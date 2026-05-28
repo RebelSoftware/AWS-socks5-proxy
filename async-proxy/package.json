@@ -1,0 +1,13 @@
+{
+  "name": "dynamic-socks5-proxy",
+  "version": "1.0.0",
+  "description": "HTTP/HTTPS Proxy with Dynamic SOCKS5 Upstream",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "socks": "^2.7.1"
+  }
+}

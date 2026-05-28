@@ -1,0 +1,478 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Fargate SOCKS5 Proxy Infrastructure - Auto-shutdown at 60min idle'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: proxy
+    Description: Environment name for resource naming
+  
+  TaskIdleTimeoutMinutes:
+    Type: Number
+    Default: 60
+    Description: Minutes of inactivity before auto-shutdown
+  
+  ClientPublicIP:
+    Type: String
+    Default: ""
+    Description: Client public IP to allowlist (e.g., 203.0.113.42/32). Leave empty to disable IP allowlist
+  
+  IPAllowlistEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable IP allowlist mode (security group restricted to ClientPublicIP)
+  
+  DualIPRetentionMinutes:
+    Type: Number
+    Default: 180
+    Description: Minutes to retain old IP in security group when IP changes (for connection continuity)
+  
+  ProxyUsername:
+    Type: String
+    Default: ""
+    Description: SOCKS5 proxy username. Leave empty for no authentication. Requires ProxyPassword.
+  
+  ProxyPassword:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: SOCKS5 proxy password. Requires ProxyUsername.
+
+Conditions:
+  IsIPAllowlistEnabled:
+    Fn::Equals:
+      - !Ref IPAllowlistEnabled
+      - 'true'
+  IsNotIPAllowlistEnabled:
+    Fn::Not:
+      - Condition: IsIPAllowlistEnabled
+  HasClientIP:
+    Fn::Not:
+      - Fn::Equals:
+          - !Ref ClientPublicIP
+          - ''
+  EnableIPAllowlist:
+    Fn::And:
+      - !Condition IsIPAllowlistEnabled
+      - !Condition HasClientIP
+  UseProxyAuth:
+    Fn::Not:
+      - Fn::Equals:
+          - !Ref ProxyUsername
+          - ''
+
+Resources:
+  ProxyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-vpc'
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProxyVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-subnet-1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProxyVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-subnet-2'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-igw'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ProxyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ProxyVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Groups
+  ProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for SOCKS5 proxy with IP allowlist support
+      VpcId: !Ref ProxyVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-sg'
+
+  # Ingress rule for IP allowlist mode
+  ProxySecurityGroupIngressAllowlist:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: EnableIPAllowlist
+    Properties:
+      GroupId: !Ref ProxySecurityGroup
+      IpProtocol: tcp
+      FromPort: 1080
+      ToPort: 1080
+      CidrIp: !Ref ClientPublicIP
+      Description: !Sub 'SOCKS5 proxy access from allowlisted IP ${ClientPublicIP}'
+
+  # Ingress rule for open access mode (when IP allowlist not enabled)
+  ProxySecurityGroupIngressOpen:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: IsNotIPAllowlistEnabled
+    Properties:
+      GroupId: !Ref ProxySecurityGroup
+      IpProtocol: tcp
+      FromPort: 1080
+      ToPort: 1080
+      CidrIp: 0.0.0.0/0
+      Description: SOCKS5 proxy port (IP allowlist not enabled)
+
+  # ECS Cluster
+  ProxyCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: proxy-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-cluster'
+
+  # Task Execution Role
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-task-execution-role'
+
+  # Task Role (for any AWS API calls from the task)
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecurityGroupManagement
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSecurityGroupRules
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-task-role'
+
+  # Task Definition for SOCKS5 Proxy
+  SOCKS5TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: go-socks5-proxy
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '256'  # 0.25 vCPU (minimum for Fargate)
+      Memory: '512'  # 512 MB
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      
+      ContainerDefinitions:
+        - Name: socks5-proxy
+          Image: serjs/go-socks5-proxy:latest
+          PortMappings:
+            - ContainerPort: 1080
+              Protocol: tcp
+          Environment:
+            # Authentication — enabled when ProxyUsername is provided
+            - Name: REQUIRE_AUTH
+              Value: !If [UseProxyAuth, 'true', 'false']
+            - Name: PROXY_USER
+              Value: !Ref ProxyUsername
+            - Name: PROXY_PASSWORD
+              Value: !Ref ProxyPassword
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TaskLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          
+          # Bind mount or volume for persistent config
+          MountPoints: []
+          
+          # Container will be stopped by orchestrator or auto-shutdown Lambda
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-task-definition'
+
+  # CloudWatch Log Group for ECS tasks
+  TaskLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${EnvironmentName}-go-socks5-proxy'
+      RetentionInDays: 7
+
+  # Lambda for Auto-Shutdown
+  AutoShutdownRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ECSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeTasks
+                  - ecs:ListTasks
+                  - ecs:StopTask
+                  - ecs:UpdateService
+                  - logs:FilterLogEvents
+                Resource: '*'
+
+  AutoShutdownFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${EnvironmentName}-socks5-autoshutdown'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt AutoShutdownRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Ref ProxyCluster
+          IDLE_TIMEOUT_MINUTES: !Ref TaskIdleTimeoutMinutes
+          LOG_GROUP_NAME: !Ref TaskLogGroup
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          from datetime import datetime, timedelta
+          
+          ecs = boto3.client('ecs')
+          logs = boto3.client('logs')
+          
+          CLUSTER_NAME = os.environ['CLUSTER_NAME']
+          IDLE_TIMEOUT_MINUTES = int(os.environ['IDLE_TIMEOUT_MINUTES'])
+          LOG_GROUP = os.environ['LOG_GROUP_NAME']
+          
+          def lambda_handler(event, context):
+              try:
+                  # List running tasks
+                  response = ecs.list_tasks(
+                      cluster=CLUSTER_NAME,
+                      desiredStatus='RUNNING'
+                  )
+                  
+                  if not response['taskArns']:
+                      print("No running tasks")
+                      return {'statusCode': 200, 'body': 'No tasks running'}
+                  
+                  # Check each task for inactivity
+                  for task_arn in response['taskArns']:
+                      task_details = ecs.describe_tasks(
+                          cluster=CLUSTER_NAME,
+                          tasks=[task_arn]
+                      )
+                      
+                      if not task_details['tasks']:
+                          continue
+                      
+                      task = task_details['tasks'][0]
+                      task_id = task_arn.split('/')[-1]
+                      
+                      # Check CloudWatch Logs for recent activity
+                      # ECS Fargate stream format: {prefix}/{container_name}/{task_id}
+                      log_stream = f"ecs/socks5-proxy/{task_id}"
+                      
+                      try:
+                          log_response = logs.filter_log_events(
+                              logGroupName=LOG_GROUP,
+                              logStreamNamePrefix=log_stream,
+                              startTime=int((datetime.now() - timedelta(minutes=IDLE_TIMEOUT_MINUTES)).timestamp() * 1000)
+                          )
+                          
+                          if log_response.get('events'):
+                              print(f"Task {task_id}: activity detected")
+                              continue
+                      except logs.exceptions.ResourceNotFoundException:
+                          pass
+                      
+                      # No recent activity, check task metrics via describe
+                      # For simplicity, we'll check the task's createdAt time
+                      created_time = task['createdAt'].replace(tzinfo=None)
+                      task_age = (datetime.utcnow() - created_time).total_seconds() / 60
+                      
+                      if task_age > IDLE_TIMEOUT_MINUTES:
+                          print(f"Stopping inactive task {task_id} (age: {task_age} minutes)")
+                          ecs.stop_task(
+                              cluster=CLUSTER_NAME,
+                              task=task_arn,
+                              reason='Auto-shutdown due to inactivity'
+                          )
+                          
+                          return {
+                              'statusCode': 200,
+                              'body': f'Stopped task {task_id} due to inactivity'
+                          }
+                  
+                  return {'statusCode': 200, 'body': 'All tasks active'}
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {'statusCode': 500, 'body': f'Error: {str(e)}'}
+
+  # EventBridge Rule to trigger auto-shutdown Lambda every 15 minutes
+  AutoShutdownSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger auto-shutdown check every 15 minutes
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AutoShutdownFunction.Arn
+          Id: AutoShutdownTarget
+
+  AutoShutdownLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AutoShutdownFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AutoShutdownSchedule.Arn
+
+Outputs:
+  ClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref ProxyCluster
+    Export:
+      Name: !Sub '${EnvironmentName}-cluster-name'
+
+  TaskDefinition:
+    Description: Task Definition ARN
+    Value: !Ref SOCKS5TaskDefinition
+    Export:
+      Name: !Sub '${EnvironmentName}-task-definition'
+
+  SecurityGroupId:
+    Description: Security Group ID for IP allowlist updates
+    Value: !Ref ProxySecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-security-group-id'
+
+  IPAllowlistEnabled:
+    Description: Whether IP allowlist is enabled
+    Value: !If [EnableIPAllowlist, 'true', 'false']
+    Export:
+      Name: !Sub '${EnvironmentName}-ip-allowlist-enabled'
+
+  AllowlistedIP:
+    Description: Currently allowlisted client IP
+    Condition: EnableIPAllowlist
+    Value: !Ref ClientPublicIP
+    Export:
+      Name: !Sub '${EnvironmentName}-allowlisted-ip'
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref ProxyVPC
+    Export:
+      Name: !Sub '${EnvironmentName}-vpc-id'
+
+  SubnetId1:
+    Description: Public Subnet 1
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub '${EnvironmentName}-subnet-1'
+
+  SubnetId2:
+    Description: Public Subnet 2
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub '${EnvironmentName}-subnet-2'
+
+  SecurityGroupId:
+    Description: Security Group ID
+    Value: !Ref ProxySecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-sg-id'
+
+  LogGroupName:
+    Description: CloudWatch Log Group
+    Value: !Ref TaskLogGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-log-group'

@@ -1,0 +1,61 @@
+# ──────────────────────────────────────────────
+# Sensitive credentials — NEVER commit these
+# ──────────────────────────────────────────────
+.env
+.env.bak
+.env.local
+.env.production
+
+# AWS, proxy, and orchestrator credentials live in .env
+# Use .env.example as a template (it's safe to commit)
+
+# ──────────────────────────────────────────────
+# History / backups — contain credential snapshots
+# ──────────────────────────────────────────────
+.history/
+
+# ──────────────────────────────────────────────
+# Dependencies
+# ──────────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ──────────────────────────────────────────────
+# Python
+# ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ──────────────────────────────────────────────
+# Build outputs
+# ──────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+
+# ──────────────────────────────────────────────
+# IDE / Editor
+# ──────────────────────────────────────────────
+.vscode/settings.json
+.vscode/workspace.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ──────────────────────────────────────────────
+# Test artifacts
+# ──────────────────────────────────────────────
+test.json
