@@ -1,9 +1,13 @@
 # AWS Fargate SOCKS5 Proxy
-### Ephemeral proxy infrastructure — pay only when you use it
+### Ephemeral proxy infrastructure — pay only when you need it
 
 A production-ready, cost-effective solution for routing traffic through a different IP using AWS Fargate and SOCKS5. Ideal for geo-testing websites, avoiding geolocation restrictions, and privacy-focused browsing.
 
 **Requirements:** AWS account, Docker locally. Not tested on Windows.
+
+**Main point of difference:** requires almost no user input other than starting and stopping the service. Transparently handles remote proxy IP address changes when used with a tool like foxyproxy. When starting a new proxy service fargate will create a new public IP address. the choices are to update your foxyproxy config on every start, pay for a fixed IP address, or use this application which handles it in the background. It even handles local and remote IP changes midstream.
+
+**This is not a VPN** Which is to say using a tool like foxyproxy you can create per website proxying rules.  
 
 **Key Stats:**
 - **Cost:** ~$1–3/month (100–200 hrs)
