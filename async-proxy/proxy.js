@@ -13,6 +13,9 @@ const LISTEN_PORT = parseInt(process.env.LISTEN_PORT) || 8080;
 const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL) || 30;
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 
+// Wake-up and idle timeout configuration
+const WAKING_TIMEOUT_MS = parseInt(process.env.WAKING_TIMEOUT_MS) || 120000;  // 2 min before falling back to idle
+
 // SOCKS5 authentication
 const PROXY_USER = process.env.PROXY_USER || '';
 const PROXY_PASSWORD = process.env.PROXY_PASSWORD || '';
@@ -52,6 +55,12 @@ class DynamicProxy {
         this.running = true;
         this.activeConnections = 0;
         this.totalRequests = 0;
+        
+        // Wake-up state machine: 'idle' | 'waking' | 'active'
+        this.wakeState = 'active';
+        this.lastActivityAt = Date.now();
+        this.wakingTimeout = null;
+        this._wakeInFlight = false;
     }
 
     async start() {
@@ -62,6 +71,10 @@ class DynamicProxy {
         const success = await this.updateEndpoint();
         if (!success) {
             logger.warn('Failed to get initial endpoint, will retry');
+            // Start idle if no endpoint — orchestrator may be waiting for wake
+            this.wakeState = 'idle';
+        } else {
+            this.wakeState = 'active';
         }
         
         // Start update loop
@@ -87,11 +100,29 @@ class DynamicProxy {
                     
                     logger.info(`Upstream changed: ${JSON.stringify(this.currentEndpoint)} -> ${newIp}:${newPort}`);
                     this.currentEndpoint = { host: newIp, port: newPort };
+                    
+                    // Transition to active — endpoint is now available
+                    if (this.wakeState !== 'active') {
+                        logger.info('Remote proxy endpoint acquired, entering active state');
+                        this.wakeState = 'active';
+                        if (this.wakingTimeout) {
+                            clearTimeout(this.wakingTimeout);
+                            this.wakingTimeout = null;
+                        }
+                        this._wakeInFlight = false;
+                    }
                     return true;
                 } else {
                     logger.debug('Endpoint unchanged');
                 }
             } else {
+                // No remote_ip — check if we need to transition to idle
+                // Only go idle if we were previously active (orchestrator shut us down)
+                if (this.currentEndpoint && this.wakeState === 'active') {
+                    logger.warn('Orchestrator returned no endpoint — proxy may have been idled');
+                    this.currentEndpoint = null;
+                    this.wakeState = 'idle';
+                }
                 logger.warn('Orchestrator returned invalid data');
             }
         } catch (err) {
@@ -118,11 +149,22 @@ class DynamicProxy {
 
     async handleRequest(clientReq, clientRes) {
         this.totalRequests++;
+        this._trackActivity();
         
-        if (!this.currentEndpoint) {
-            logger.error('No SOCKS5 endpoint available');
-            clientRes.writeHead(503, { 'Content-Type': 'text/plain' });
-            clientRes.end('Proxy not ready - no upstream endpoint');
+        // Wake state machine — handle idle/waking before routing
+        if (!this.currentEndpoint || this.wakeState !== 'active') {
+            if (this.wakeState === 'idle') {
+                logger.info('Request received while idle, triggering wake...');
+                this.triggerWake();
+                clientRes.writeHead(503, { 'Content-Type': 'text/plain', 'Retry-After': '5' });
+                clientRes.end('Proxy is waking up — retry in a few seconds');
+            } else if (this.wakeState === 'waking') {
+                clientRes.writeHead(503, { 'Content-Type': 'text/plain', 'Retry-After': '10' });
+                clientRes.end('Proxy is still starting — retry shortly');
+            } else {
+                clientRes.writeHead(503, { 'Content-Type': 'text/plain' });
+                clientRes.end('Proxy not ready - no upstream endpoint');
+            }
             return;
         }
 
@@ -233,8 +275,6 @@ class DynamicProxy {
 
             proxySocket.on('close', cleanup);
             clientReq.on('close', cleanup);
-            proxySocket.on('close', cleanup);
-            clientReq.on('close', cleanup);
 
         } catch (err) {
             logger.error('Request handling error:', err.message);
@@ -247,11 +287,22 @@ class DynamicProxy {
 
     async handleConnect(clientReq, clientSocket, head) {
         this.totalRequests++;
+        this._trackActivity();
         
-        if (!this.currentEndpoint) {
-            logger.error('No SOCKS5 endpoint available for CONNECT');
-            clientSocket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
-            clientSocket.end();
+        // Wake state machine — handle idle/waking before routing
+        if (!this.currentEndpoint || this.wakeState !== 'active') {
+            if (this.wakeState === 'idle') {
+                logger.info('CONNECT request received while idle, triggering wake...');
+                this.triggerWake();
+                clientSocket.write('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n');
+                clientSocket.end();
+            } else if (this.wakeState === 'waking') {
+                clientSocket.write('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 10\r\n\r\n');
+                clientSocket.end();
+            } else {
+                clientSocket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+                clientSocket.end();
+            }
             return;
         }
 
@@ -343,11 +394,62 @@ class DynamicProxy {
         return filtered;
     }
 
+    async triggerWake() {
+        /* Send wake signal to orchestrator. Only fires once per idle cycle. */
+        if (this.wakeState !== 'idle' || this._wakeInFlight) return;
+        
+        this._wakeInFlight = true;
+        logger.info('Triggering wake-up of remote proxy...');
+        
+        try {
+            const response = await axios.post(`${this.orchestratorUrl}/wake`, {}, {
+                timeout: 5000,
+                validateStatus: status => status < 500
+            });
+            
+            if (response.status === 200 || response.status === 202) {
+                logger.info('Wake signal accepted, transitioning to waking state');
+                this.wakeState = 'waking';
+                
+                // Safety timeout: if endpoint doesn't appear, return to idle
+                this.wakingTimeout = setTimeout(() => {
+                    if (this.wakeState === 'waking' && !this.currentEndpoint) {
+                        logger.warn('Wake timeout — no endpoint appeared within timeout, returning to idle');
+                        this.wakeState = 'idle';
+                        this._wakeInFlight = false;
+                    }
+                }, WAKING_TIMEOUT_MS);
+            } else if (response.status === 409) {
+                // Orchestrator is in explicit stop mode — don't retry
+                logger.info('Orchestrator returned explicit stop (409), staying idle');
+                this.wakeState = 'idle';
+                this._wakeInFlight = false;
+            } else {
+                logger.warn(`Unexpected wake response: ${response.status}`);
+                this.wakeState = 'idle';
+                this._wakeInFlight = false;
+            }
+        } catch (err) {
+            logger.error('Wake request failed:', err.message);
+            this.wakeState = 'idle';
+            this._wakeInFlight = false;
+        }
+    }
+
+    _trackActivity() {
+        /* Mark activity timestamp — called on each real proxy request */
+        this.lastActivityAt = Date.now();
+    }
+
     shutdown() {
         logger.info('Shutting down proxy...');
         this.running = false;
         if (this.updateInterval) {
             clearInterval(this.updateInterval);
+        }
+        if (this.wakingTimeout) {
+            clearTimeout(this.wakingTimeout);
+            this.wakingTimeout = null;
         }
     }
 }
@@ -365,11 +467,16 @@ const statusServer = http.createServer((req, res) => {
     };
 
     if (req.url === '/health') {
+        const now = Date.now();
+        const idleForSeconds = proxy.lastActivityAt ? Math.round((now - proxy.lastActivityAt) / 1000) : null;
         const status = {
             status: proxy.running ? 'running' : 'stopped',
             endpoint: proxy.currentEndpoint,
             activeConnections: proxy.activeConnections,
-            totalRequests: proxy.totalRequests
+            totalRequests: proxy.totalRequests,
+            wakeState: proxy.wakeState,
+            lastActivityAt: proxy.lastActivityAt,
+            idleForSeconds: idleForSeconds
         };
         sendJson(status);
     } else if (req.url === '/test-socks5') {

@@ -49,6 +49,11 @@ IP_ALLOWLIST_ENABLED = os.getenv('IP_ALLOWLIST_ENABLED', 'false').lower() == 'tr
 CLIENT_SECURITY_GROUP_ID = os.getenv('CLIENT_SECURITY_GROUP_ID')  # Security group ID to update with client IP
 DUAL_IP_RETENTION_MINUTES = int(os.getenv('DUAL_IP_RETENTION_MINUTES', '180'))
 
+# Idle timeout and wake configuration
+# Falls back to TASK_IDLE_TIMEOUT_MINUTES for backwards compatibility with setup.sh/.env
+IDLE_TIMEOUT_MINUTES = int(os.getenv('IDLE_TIMEOUT_MINUTES') or os.getenv('TASK_IDLE_TIMEOUT_MINUTES', '60'))
+HTTP_PROXY_HEALTH_URL = os.getenv('HTTP_PROXY_HEALTH_URL', 'http://http-proxy:8081/health')
+
 # Validation
 if not TASK_SUBNET:
     logger.error("TASK_SUBNET environment variable not set")
@@ -69,6 +74,8 @@ logger.info(f"  IP_ALLOWLIST_ENABLED: {IP_ALLOWLIST_ENABLED}")
 if IP_ALLOWLIST_ENABLED:
     logger.info(f"  CLIENT_SECURITY_GROUP_ID: {CLIENT_SECURITY_GROUP_ID}")
     logger.info(f"  DUAL_IP_RETENTION_MINUTES: {DUAL_IP_RETENTION_MINUTES}")
+logger.info(f"  IDLE_TIMEOUT_MINUTES: {IDLE_TIMEOUT_MINUTES}")
+logger.info(f"  HTTP_PROXY_HEALTH_URL: {HTTP_PROXY_HEALTH_URL}")
 
 
 
@@ -90,6 +97,11 @@ class FargateProxyOrchestrator:
         self.last_update_time = time.time()
         self.connection_errors = 0
         self.max_connection_errors = 5
+        
+        # Idle timeout and wake-up state
+        self.idle_mode = False
+        self.explicit_stop = False
+        self.last_activity_at = None  # Timestamp of last proxy activity (from http-proxy health)
         
         # IP allowlist tracking for dual-IP support
         self.local_public_ip = None
@@ -548,6 +560,62 @@ class FargateProxyOrchestrator:
         except Exception as e:
             logger.error(f"Error in ensure_task_running: {e}", exc_info=True)
             return None
+    
+    def _get_proxy_health(self):
+        """Poll http-proxy health endpoint for activity data"""
+        try:
+            response = requests.get(HTTP_PROXY_HEALTH_URL, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                self.last_activity_at = data.get('lastActivityAt')
+                return data
+            else:
+                logger.warning(f"Proxy health endpoint returned {response.status_code}")
+                return None
+        except requests.exceptions.ConnectionError:
+            logger.debug("Cannot reach http-proxy health endpoint (container may be starting)")
+            return None
+        except Exception as e:
+            logger.debug(f"Error polling proxy health: {e}")
+            return None
+    
+    def _check_idle_and_shutdown(self):
+        """Check if proxy has been idle too long and shut down the remote task"""
+        if self.idle_mode or self.explicit_stop:
+            return
+        
+        health = self._get_proxy_health()
+        if not health:
+            return  # Can't determine — skip this cycle
+        
+        active_connections = health.get('activeConnections', 0)
+        last_activity_ts = health.get('lastActivityAt')
+        wake_state = health.get('wakeState', 'active')
+        
+        # Consider idle only when no active connections AND wake state is active
+        # (don't shut down while already waking up)
+        if active_connections > 0 or wake_state != 'active':
+            return
+        
+        if last_activity_ts is None:
+            return
+        
+        idle_seconds = (time.time() * 1000 - last_activity_ts) / 1000
+        idle_minutes = idle_seconds / 60
+        
+        if idle_minutes >= IDLE_TIMEOUT_MINUTES and self.task_arn:
+            logger.warning(
+                f"Proxy idle for {idle_minutes:.1f} minutes (timeout: {IDLE_TIMEOUT_MINUTES}m) — "
+                f"shutting down remote task"
+            )
+            if self.stop_task(self.task_arn):
+                self.task_arn = None
+                self.task_ip = None
+                self.idle_mode = True
+                logger.info("Remote task stopped due to idle timeout, entering idle mode")
+                return True
+        
+        return False
 
 
 # Initialize orchestrator and Flask app
@@ -567,6 +635,9 @@ def status():
             'remote_task': orchestrator.task_arn,
             'local_port': LOCAL_PROXY_PORT,
             'socks5_port': SOCKS5_PORT,
+            'idle_mode': orchestrator.idle_mode,
+            'explicit_stop': orchestrator.explicit_stop,
+            'idle_timeout_minutes': IDLE_TIMEOUT_MINUTES,
             'timestamp': datetime.utcnow().isoformat()
         }
         
@@ -592,6 +663,9 @@ def start_proxy():
     """Manually start a new proxy task"""
     try:
         logger.info("Received manual start request")
+        orchestrator.explicit_stop = False
+        orchestrator.idle_mode = False
+        
         ip = orchestrator.ensure_task_running()
         
         if ip:
@@ -603,11 +677,46 @@ def start_proxy():
         return {'status': 'error', 'message': str(e)}, 500
 
 
+@app.route('/wake', methods=['POST'])
+def wake_proxy():
+    """Wake up from idle — start a new Fargate task on demand"""
+    try:
+        logger.info("Received wake request from http-proxy")
+        
+        if orchestrator.explicit_stop:
+            logger.warning("Wake rejected — proxy was explicitly stopped")
+            return {
+                'status': 'error',
+                'message': 'Proxy was explicitly stopped. Use POST /start to re-enable.'
+            }, 409
+        
+        orchestrator.idle_mode = False
+        
+        # Re-check IP allowlist in case client IP changed while idle
+        if IP_ALLOWLIST_ENABLED:
+            orchestrator.check_and_update_ip()
+        
+        ip = orchestrator.ensure_task_running()
+        
+        if ip:
+            logger.info(f"Wake successful — task running at {ip}")
+            return {'status': 'success', 'ip': ip, 'task': orchestrator.task_arn}, 200
+        else:
+            logger.warning("Wake initiated but task not yet ready")
+            return {'status': 'accepted', 'message': 'Task starting, check /status'}, 202
+    except Exception as e:
+        logger.error(f"Error in /wake endpoint: {e}", exc_info=True)
+        return {'status': 'error', 'message': str(e)}, 500
+
+
 @app.route('/stop', methods=['POST'])
 def stop_proxy():
     """Stop the current proxy task"""
     try:
         logger.info("Received stop request")
+        orchestrator.explicit_stop = True
+        orchestrator.idle_mode = True
+        
         if orchestrator.task_arn:
             success = orchestrator.stop_task(orchestrator.task_arn)
             orchestrator.task_arn = None
@@ -618,7 +727,7 @@ def stop_proxy():
             else:
                 return {'status': 'error', 'message': 'Failed to stop task'}, 500
         else:
-            return {'status': 'error', 'message': 'No running task'}, 400
+            return {'status': 'success', 'message': 'No running task, marked as stopped'}, 200
     except Exception as e:
         logger.error(f"Error in /stop endpoint: {e}", exc_info=True)
         return {'status': 'error', 'message': str(e)}, 500
@@ -804,7 +913,7 @@ def notify_http_proxy(ip, port):
 
 
 def monitor_task():
-    """Background thread that monitors task health and IP changes"""
+    """Background thread that monitors task health, idle timeout, and IP changes"""
     logger.info("Starting task monitor thread...")
     
     check_interval = 30
@@ -813,6 +922,16 @@ def monitor_task():
     
     while True:
         try:
+            # When idle or explicitly stopped, skip task management entirely
+            if orchestrator.idle_mode or orchestrator.explicit_stop:
+                logger.debug(f"Idle mode active (idle={orchestrator.idle_mode}, explicit_stop={orchestrator.explicit_stop}) — skipping task management")
+                ip_check_counter += 1
+                if ip_check_counter >= 2:
+                    orchestrator.check_and_update_ip()
+                    ip_check_counter = 0
+                time.sleep(check_interval)
+                continue
+            
             # Ensure we have a running task
             current_ip = orchestrator.ensure_task_running()
             
@@ -823,13 +942,17 @@ def monitor_task():
                     notify_http_proxy(current_ip, SOCKS5_PORT)
                 previous_ip = current_ip
             
+            # Check idle timeout — shut down remote if proxy is idle
+            if current_ip:
+                orchestrator._check_idle_and_shutdown()
+            
             # Check local public IP and update security group (every 60 seconds)
             ip_check_counter += 1
             if ip_check_counter >= 2:
                 orchestrator.check_and_update_ip()
                 ip_check_counter = 0
             
-            logger.debug(f"Monitor check complete - remote IP: {current_ip}, local IP: {orchestrator.local_public_ip}")
+            logger.debug(f"Monitor check complete - remote IP: {current_ip}, idle: {orchestrator.idle_mode}")
             time.sleep(check_interval)
         
         except Exception as e:
