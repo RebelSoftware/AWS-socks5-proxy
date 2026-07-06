@@ -1,17 +1,14 @@
-# Security Configuration
+# Security Configuration — IP Allowlist & Authentication
 
-## Overview
+> The proxy supports **three independent security layers**. See [README.md](./README.md#security) for the config table and [DEPLOYMENT.md](./DEPLOYMENT.md) for deployment commands.
 
-The SOCKS5 proxy supports **two complementary security layers** that can be used independently or together:
+| Layer | What it protects | Best For |
+|-------|-----------------|----------|
+| **Local HTTP proxy auth** | Access to `localhost:8080` | LAN/multi-device deployments |
+| **IP Allowlist** (AWS SG) | Fargate SOCKS5 port 1080 | Office/static IP environments |
+| **SOCKS5 auth** | Upstream proxy connection | Dynamic IPs, defense-in-depth |
 
-| Layer | Mechanism | Best For |
-|-------|-----------|----------|
-| **IP Allowlist** | AWS security group restricts port 1080 to your IP | Office/static IP environments |
-| **Username/Password** | SOCKS5 authentication via `PROXY_USER`/`PROXY_PASSWORD` | Dynamic IPs, defense-in-depth |
-
-During `setup.sh`, you **must** enable at least one layer:
-- If you decline the IP allowlist, username/password auth is **mandatory**
-- If you enable the IP allowlist, username/password auth is **optional** (recommended for extra protection)
+During `setup.sh`, you must enable at least one of the AWS-facing layers (IP allowlist or SOCKS5 auth). Local proxy auth is optional and independent.
 
 ---
 
@@ -19,119 +16,20 @@ During `setup.sh`, you **must** enable at least one layer:
 
 ### IP Allowlist Mode (Recommended for Static IPs)
 
-**When to use:** Office environments with fixed or semi-dynamic IPs
-
-- Security group restricted to your client's public IP (`/32` CIDR)
-- No authentication required (default) — security by network isolation
-- Automatic IP change detection and security group updates
-- Dual-IP retention: maintains both old and new IPs for 180 minutes during transitions
+Security group restricted to your client's public IP (`/32` CIDR). Automatic IP change detection and security group updates. Dual-IP retention: maintains both old and new IPs for 180 minutes during transitions.
 
 **Security guarantees:**
 - ✅ Only your IP can reach the proxy port (1080)
-- ✅ Anyone at another IP cannot access the proxy
 - ✅ Automatic recovery if your IP changes mid-session
-- ✅ Full audit trail of IP changes in logs
+- ✅ Dual-IP retention prevents dropped connections during IP transitions
 
-### Username/Password Authentication (Required when IP allowlist is off)
+### SOCKS5 Username/Password Authentication
 
-**When to use:** Dynamic IPs, travel, or as an additional security layer
+SOCKS5 username/password auth (RFC 1929) between the local HTTP proxy and the Fargate task. Credentials passed as environment variables. Can be combined with IP allowlist for defense-in-depth.
 
-- SOCKS5 username/password authentication (RFC 1929)
-- Credentials passed as environment variables to the Fargate container
-- Local proxy automatically uses credentials when connecting
-- Can be combined with IP allowlist for defense-in-depth
+### Local HTTP Proxy Authentication
 
-**Security guarantees:**
-- ✅ Only users with valid credentials can connect
-- ✅ Works from any IP address
-- ✅ Credentials never stored in files (environment variables only)
-- ✅ Backup security layer if IP allowlist is compromised
-
----
-
-## Deployment
-
-### Automated Setup (Recommended)
-
-Run `./setup.sh` and follow the prompts. It will ask about:
-1. **IP allowlist** — Enable/disable (auto-detects your public IP)
-2. **Username/password** — Set credentials (required if IP allowlist is off)
-3. **Idle timeout** — Configure auto-shutdown minutes
-
-### Manual Deployment with IP Allowlist
-
-Deploy the CloudFormation stack with IP allowlist enabled:
-
-```bash
-YOUR_PUBLIC_IP="203.0.113.42"  # Replace with your actual IP
-
-aws cloudformation create-stack \
-  --stack-name socks5-proxy-stack \
-  --template-body file://fargate-infrastructure.yaml \
-  --parameters \
-    ParameterKey=EnvironmentName,ParameterValue=proxy \
-    ParameterKey=IPAllowlistEnabled,ParameterValue=true \
-    ParameterKey=ClientPublicIP,ParameterValue="${YOUR_PUBLIC_IP}/32" \
-    ParameterKey=DualIPRetentionMinutes,ParameterValue=180 \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region us-east-1
-```
-
-### Manual Deployment with Username/Password Auth (No IP Allowlist)
-
-```bash
-aws cloudformation create-stack \
-  --stack-name socks5-proxy-stack \
-  --template-body file://fargate-infrastructure.yaml \
-  --parameters \
-    ParameterKey=EnvironmentName,ParameterValue=proxy \
-    ParameterKey=IPAllowlistEnabled,ParameterValue=false \
-    ParameterKey=ProxyUsername,ParameterValue=myuser \
-    ParameterKey=ProxyPassword,ParameterValue=mypassword \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --region us-east-1
-```
-
-### Get Stack Outputs
-
-After stack creation, get the security group ID:
-
-```bash
-aws cloudformation describe-stacks \
-  --stack-name socks5-proxy-stack \
-  --query 'Stacks[0].Outputs' \
-  --region us-east-1
-```
-
-Note the `SecurityGroupId` value.
-
-### Configure Local Orchestrator
-
-Update your `.env` file with:
-
-```bash
-# IP Allowlist configuration
-IP_ALLOWLIST_ENABLED=true
-CLIENT_SECURITY_GROUP_ID=sg-0123456789abcdef0  # From stack outputs
-DUAL_IP_RETENTION_MINUTES=180
-
-# Username/password (if enabled)
-REQUIRE_AUTH=true
-PROXY_USER=myuser
-PROXY_PASSWORD=mypassword
-```
-
-### Start the Proxy
-
-```bash
-./proxy-manage.sh start
-```
-
-The orchestrator will:
-1. Detect your local machine's public IP (if allowlist enabled)
-2. Verify it's in the security group
-3. Automatically add it if it's not yet in the rules
-4. Track IP changes and update the SG as needed
+HTTP `Proxy-Authorization: Basic` header required to use the local proxy at all. Independent of the other layers. Ideal for LAN deployments where untrusted devices share the network. See [README.md](./README.md#security) for configuration.
 
 ---
 
@@ -291,16 +189,16 @@ If orchestrator shows `null` for `local_public_ip`:
    ```
 3. Verify AWS credentials for EC2 API access
 
----
+## Environment Variables
 
-## Environment Variables Reference
+All configuration variables are documented in [README.md](./README.md#configuration). Security-specific ones:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `IP_ALLOWLIST_ENABLED` | `false` | Enable/disable IP allowlist mode |
 | `CLIENT_SECURITY_GROUP_ID` | (required) | SG ID to update with client IP |
 | `DUAL_IP_RETENTION_MINUTES` | `180` | Minutes to keep old IP after change |
-| `AWS_REGION` | `us-east-1` | AWS region for EC2 API calls |
+| `LOCAL_REQUIRE_AUTH` | `false` | Enable local HTTP proxy authentication |
 
 ---
 
