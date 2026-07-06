@@ -16,6 +16,10 @@ services:
       - REQUIRE_AUTH=${REQUIRE_AUTH:-false}
       - PROXY_USER=${PROXY_USER:-}
       - PROXY_PASSWORD=${PROXY_PASSWORD:-}
+      # Local proxy authentication (for LAN/multi-device use)
+      - LOCAL_REQUIRE_AUTH=${LOCAL_REQUIRE_AUTH:-false}
+      - LOCAL_PROXY_USER=${LOCAL_PROXY_USER:-}
+      - LOCAL_PROXY_PASSWORD=${LOCAL_PROXY_PASSWORD:-}
     depends_on:
       - orchestrator
     networks:

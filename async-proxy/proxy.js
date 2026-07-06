@@ -16,10 +16,15 @@ const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 // Wake-up and idle timeout configuration
 const WAKING_TIMEOUT_MS = parseInt(process.env.WAKING_TIMEOUT_MS) || 120000;  // 2 min before falling back to idle
 
-// SOCKS5 authentication
+// SOCKS5 authentication (upstream to Fargate)
 const PROXY_USER = process.env.PROXY_USER || '';
 const PROXY_PASSWORD = process.env.PROXY_PASSWORD || '';
 const REQUIRE_AUTH = (process.env.REQUIRE_AUTH || 'false').toLowerCase() === 'true';
+
+// Local HTTP proxy authentication (incoming from browser)
+const LOCAL_PROXY_USER = process.env.LOCAL_PROXY_USER || '';
+const LOCAL_PROXY_PASSWORD = process.env.LOCAL_PROXY_PASSWORD || '';
+const LOCAL_REQUIRE_AUTH = (process.env.LOCAL_REQUIRE_AUTH || 'false').toLowerCase() === 'true';
 
 // Build SOCKS5 proxy options with optional auth
 function getSocksProxyOptions(host, port) {
@@ -149,6 +154,13 @@ class DynamicProxy {
 
     async handleRequest(clientReq, clientRes) {
         this.totalRequests++;
+        
+        // Local proxy authentication check
+        if (!this._checkLocalAuth(clientReq)) {
+            this._send407(clientRes);
+            return;
+        }
+        
         this._trackActivity();
         
         // Wake state machine — handle idle/waking before routing
@@ -287,6 +299,14 @@ class DynamicProxy {
 
     async handleConnect(clientReq, clientSocket, head) {
         this.totalRequests++;
+        
+        // Local proxy authentication check
+        if (!this._checkLocalAuth(clientReq)) {
+            clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="SOCKS5 Proxy"\r\n\r\n');
+            clientSocket.end();
+            return;
+        }
+        
         this._trackActivity();
         
         // Wake state machine — handle idle/waking before routing
@@ -433,6 +453,53 @@ class DynamicProxy {
             logger.error('Wake request failed:', err.message);
             this.wakeState = 'idle';
             this._wakeInFlight = false;
+        }
+    }
+
+    _checkLocalAuth(req) {
+        /* Validate Proxy-Authorization header for local HTTP proxy access.
+           Returns true if auth passes or local auth is disabled. */
+        if (!LOCAL_REQUIRE_AUTH) return true;
+        
+        const authHeader = req.headers['proxy-authorization'];
+        if (!authHeader) {
+            logger.warn('Local auth required but no Proxy-Authorization header');
+            return false;
+        }
+        
+        // Parse Basic auth
+        const parts = authHeader.split(' ');
+        if (parts.length !== 2 || parts[0].toLowerCase() !== 'basic') {
+            logger.warn('Local auth: unsupported scheme (expected Basic)');
+            return false;
+        }
+        
+        try {
+            const decoded = Buffer.from(parts[1], 'base64').toString('utf8');
+            const colon = decoded.indexOf(':');
+            if (colon === -1) return false;
+            const user = decoded.substring(0, colon);
+            const pass = decoded.substring(colon + 1);
+            
+            if (user === LOCAL_PROXY_USER && pass === LOCAL_PROXY_PASSWORD) {
+                return true;
+            }
+            logger.warn(`Local auth failed for user: ${user}`);
+            return false;
+        } catch (err) {
+            logger.warn('Local auth: failed to decode credentials');
+            return false;
+        }
+    }
+
+    _send407(res) {
+        /* Send HTTP 407 Proxy Authentication Required */
+        if (!res.headersSent) {
+            res.writeHead(407, {
+                'Content-Type': 'text/plain',
+                'Proxy-Authenticate': 'Basic realm="SOCKS5 Proxy"'
+            });
+            res.end('Proxy authentication required');
         }
     }
 
