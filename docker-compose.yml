@@ -5,13 +5,15 @@ services:
     container_name: http-proxy
     restart: unless-stopped
     ports:
-      - "8080:8080"  # HTTP proxy port
+      - "${LOCAL_PROXY_PORT:-8080}:${LOCAL_PROXY_PORT:-8080}"  # HTTP proxy port
     environment:
       - LISTEN_HOST=0.0.0.0
-      - LISTEN_PORT=8080
-      - ORCHESTRATOR_URL=http://orchestrator:5000
-      - CHECK_INTERVAL=30
-      - LOG_LEVEL=INFO
+      - LISTEN_PORT=${LOCAL_PROXY_PORT:-8080}
+      - HEALTH_PORT=${HEALTH_PORT:-8081}
+      - ORCHESTRATOR_URL=http://orchestrator:${ORCHESTRATOR_PORT:-5000}
+      - CHECK_INTERVAL=${CHECK_INTERVAL:-30}
+      - WAKING_TIMEOUT_MS=${WAKING_TIMEOUT_MS:-120000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # Proxy authentication (from .env)
       - REQUIRE_AUTH=${REQUIRE_AUTH:-false}
       - PROXY_USER=${PROXY_USER:-}
@@ -25,7 +27,7 @@ services:
     networks:
       - proxy-network
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8081/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:${HEALTH_PORT:-8081}/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -40,28 +42,28 @@ services:
     container_name: proxy-orchestrator
     restart: unless-stopped
     ports:
-      - "5000:5000"  # Management API
+      - "${ORCHESTRATOR_PORT:-5000}:${ORCHESTRATOR_PORT:-5000}"  # Management API
     environment:
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - ECS_CLUSTER=${ECS_CLUSTER:-proxy-cluster}
       - ECS_TASK_DEFINITION=${ECS_TASK_DEFINITION:-go-socks5-proxy}
       - TASK_SUBNET=${TASK_SUBNET}
       - TASK_SECURITY_GROUP=${TASK_SECURITY_GROUP}
-      - SOCKS5_PORT=1080
-      - LOG_LEVEL=INFO
+      - SOCKS5_PORT=${SOCKS5_PORT:-1080}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # IP Allowlist configuration
       - IP_ALLOWLIST_ENABLED=${IP_ALLOWLIST_ENABLED:-false}
       - CLIENT_SECURITY_GROUP_ID=${CLIENT_SECURITY_GROUP_ID}
       - DUAL_IP_RETENTION_MINUTES=${DUAL_IP_RETENTION_MINUTES:-180}
       # Idle timeout — remote proxy shuts down after this many minutes of inactivity
       - IDLE_TIMEOUT_MINUTES=${IDLE_TIMEOUT_MINUTES:-60}
-      - HTTP_PROXY_HEALTH_URL=http://http-proxy:8081/health
+      - HTTP_PROXY_HEALTH_URL=${HTTP_PROXY_HEALTH_URL:-http://http-proxy:8081/health}
     env_file:
       - .env
     networks:
       - proxy-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/status"]
+      test: ["CMD", "curl", "-f", "http://localhost:${ORCHESTRATOR_PORT:-5000}/status"]
       interval: 30s
       timeout: 3s
       retries: 3

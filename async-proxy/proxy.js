@@ -10,6 +10,7 @@ const { SocksClient } = require('socks');
 const ORCHESTRATOR_URL = process.env.ORCHESTRATOR_URL || 'http://localhost:5000';
 const LISTEN_HOST = process.env.LISTEN_HOST || '0.0.0.0';
 const LISTEN_PORT = parseInt(process.env.LISTEN_PORT) || 8080;
+const HEALTH_PORT = parseInt(process.env.HEALTH_PORT) || (LISTEN_PORT + 1);
 const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL) || 30;
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 
@@ -594,7 +595,7 @@ async function main() {
     await proxy.start();
 
     // Start management server on a different port
-    const managementPort = LISTEN_PORT + 1;
+    const managementPort = HEALTH_PORT;
     statusServer.listen(managementPort, LISTEN_HOST, () => {
         logger.info(`Management server listening on ${LISTEN_HOST}:${managementPort}`);
     });
