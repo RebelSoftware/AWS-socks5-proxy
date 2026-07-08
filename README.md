@@ -79,7 +79,11 @@ Browser always connects to `localhost:8080` — no reconfiguration needed betwee
 ./proxy-manage.sh info               # Cost/config summary
 ```
 
-**Browser config:** Set HTTP & HTTPS proxy to `localhost:8080`.
+**Browser config:**
+- **On this machine:** proxy `localhost:8080`
+- **On other LAN devices:** proxy `proxyname.local:8080` (your machine's LAN IP)
+
+See [Local Network Proxy](#local-network-proxy) for multi-device setup.
 
 ---
 
@@ -169,8 +173,8 @@ Ephemeral by design — auto-shutdown after the configured idle timeout (default
 
 If you put your PC to sleep the local Docker containers stop — the remote proxy has already been shut down by the idle timeout at that point since no requests were flowing. If your local containers are still running (e.g. always-on device), the idle timeout still applies and the remote will shut down.
 
-**Can I use this remotely?**  
-Designed for local use only. See [DEPLOYMENT.md](./DEPLOYMENT.md) for options. For deploying as a shared network proxy on a local LAN, see the Network Proxy roadmap below.
+**Can I use this for other devices on my network?**  
+Yes — the proxy already listens on all network interfaces. Point any device on your LAN to `http://[your-machine-ip]:8080`. Enable `LOCAL_REQUIRE_AUTH=true` (see [configuration](#configuration)) to prevent unauthorized access. See [Local Network Proxy](#local-network-proxy).
 
 **How is security handled?**  
 Two complementary layers: IP allowlist (security group restriction) and/or SOCKS5 username/password authentication. Encrypted end-to-end.
@@ -189,48 +193,64 @@ Yes — see [serjs/go-socks5-proxy](https://github.com/serjs/socks5-server) for 
 |---------|-------|
 | Proxy won't start | `docker compose logs`, `aws sts get-caller-identity` |
 | Fargate task won't init | `aws ecs list-tasks --cluster proxy-cluster`, check CloudWatch logs & security groups |
-| Can't connect | `curl http://localhost:8080`, verify browser proxy is `localhost:8080`, `docker compose ps` |
+| Can't connect locally | `curl http://localhost:8080`, `docker compose ps` |
+| Can't connect from another device | `curl http://[your-lan-ip]:8080` from that device, check firewall isn't blocking port 8080 |
 | Auth errors | Verify `PROXY_USER`/`PROXY_PASSWORD` match between `.env` and Fargate task definition |
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed troubleshooting.
 
 ---
 
-## Roadmap: Local Network Proxy
+## Local Network Proxy
 
-The current design runs the proxy locally at `localhost:8080`, available only to the machine running Docker. A natural next step is to make it available to **all devices on your local network** — phones, tablets, laptops, TVs — so they all share the same Fargate SOCKS5 tunnel.
+The proxy already listens on all network interfaces (`0.0.0.0:8080`). Any device on your LAN can use it — no code changes needed.
 
-### Approach
+### Setup
 
-Deploy the local components (proxy.js + orchestrator) on a **small always-on device** (Raspberry Pi, old PC, thin client, etc.) on your network. The architecture stays the same:
+**1. Find your machine's LAN IP**
+
+```bash
+ip addr show | grep 'inet ' | grep -v 127.0.0.1
+# Example output: inet 192.168.1.100/24 → LAN IP is 192.168.1.100
+```
+
+**2. Configure devices**
+
+Point each device's HTTP/HTTPS proxy settings to `http://[your-lan-ip]:8080`. If you enabled local proxy auth (`LOCAL_REQUIRE_AUTH=true`), use `http://user:pass@[lan-ip]:8080`.
+
+**3. Open the firewall (if needed)**
+
+```bash
+# ufw
+sudo ufw allow 8080/tcp comment 'SOCKS5 proxy'
+
+# firewalld
+sudo firewall-cmd --permanent --add-port=8080/tcp && sudo firewall-cmd --reload
+```
+
+### Best Practices
+
+| Concern | Recommendation |
+|---------|----------------|
+| **Authentication** | Enable `LOCAL_REQUIRE_AUTH=true` in `.env` so not just anyone on the network can use the proxy |
+| **Persistence** | `restart: always` is already set in `docker-compose.yml` — containers restart on crash/reboot |
+| **Startup on boot** | Enable Docker to start on boot: `sudo systemctl enable docker` |
+| **IP allowlist** | If enabled, the orchestrator updates the security group for your machine's public IP — works through NAT. If devices have different public IPs, consider disabling IP allowlisting and relying on local proxy auth + SOCKS5 auth instead |
+| **Idle timeout** | The default 60-min timeout prevents the remote Fargate proxy from running 24/7 when nobody is using it. Without this, a shared household proxy would cost ~$8-9/month |
+
+### Architecture
 
 ```
 Any Device on LAN (proxy → 192.168.1.100:8080)
          ↓
-Local HTTP Proxy — running on the always-on box
+Local HTTP Proxy (this machine)
          ↓
-Local Orchestrator — running on the same box
+Local Orchestrator (this machine)
          ↓
-AWS Fargate SOCKS5 Proxy (ephemeral, auto-idle)
+AWS Fargate SOCKS5 Proxy (auto-idle when not in use)
          ↓
 Internet (with your AWS region's IP)
 ```
-
-### Changes Required
-
-| Concern | Solution |
-|---------|----------|
-| **Network binding** | Change `LISTEN_HOST` from `0.0.0.0` to the LAN IP or keep `0.0.0.0` and open port 8080 on the device's firewall |
-| **Persistence** | Use `restart: always` in `docker-compose.yml` so containers survive reboots |
-| **Remote access** | SSH tunnel, Tailscale, or WireGuard if you want access from outside the LAN |
-| **IP allowlist** | If enabled, the orchestrator already updates the security group — works for any LAN with a shared public IP (NAT). If each device has a different public IP, you may want to disable IP allowlisting and rely on SOCKS5 auth instead |
-| **Auth** | Enable `LOCAL_REQUIRE_AUTH=true` with a shared username/password so only authorized devices can use the proxy. Pair with SOCKS5 auth (`REQUIRE_AUTH=true`) for defense-in-depth. |
-| **Management UI** | The orchestrator API on port 5000 could be extended with a simple dashboard for monitoring usage and idle status |
-| **Startup on boot** | Add `docker compose up -d` to a systemd service or cron `@reboot` |
-
-### Why This Works Now
-
-The idle timeout is what makes this practical for a shared device. Without it, the remote Fargate proxy would run 24/7 — costing ~$8-9/month. With it, the proxy shuts down when the household is asleep, at work, or away, and wakes automatically on the first browse of the day.
 
 ---
 
