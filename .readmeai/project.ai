@@ -71,6 +71,19 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
   `aws configure list-profiles` and asks the user which to use (auto-selects
   when only one exists). Env-var credentials remain an option; the mid-script
   credential restore now honors the chosen profile.
+- Incident fix (2026-08-14): proxy appeared down due to three overlapping
+  causes — (1) stale orchestrator IAM key in `.env` (deleted by an earlier
+  `setup.sh` key rotation; re-running `setup.sh` rotates keys, so containers
+  must be recreated after), (2) host port 8080 held by another VS Code
+  session's port forward, leaving `http-proxy` stuck in "Created" state, and
+  (3) httpbin.org itself returning 503s, masking the real issues. Fixed by
+  rotating the orchestrator key into `.env`, freeing port 8080, and recreating
+  containers. Lesson: after re-running `setup.sh`, run
+  `docker compose up -d --force-recreate`.
+- `proxy-manage.sh` hardening: `status`/`start`/`stop` now check both
+  containers by real run state via `docker inspect` (name-matching
+  `docker compose ps` counts a "Created" container as running), and ECS calls
+  pass `--region "$AWS_REGION"` explicitly.
 
 ## Pending tasks
 

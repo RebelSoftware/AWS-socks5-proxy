@@ -39,6 +39,12 @@ print_info() {
     echo -e "${BLUE}ℹ $1${NC}"
 }
 
+container_is_up() {
+    # True if the container with this name exists and is actually running
+    # (not just "Created" or "Exited" — docker compose ps would match those too)
+    [ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" = "running" ]
+}
+
 start_proxy() {
     print_header "Starting Proxy"
     
@@ -54,11 +60,12 @@ start_proxy() {
     sleep 5
     
     # Check if running
-    if docker compose ps | grep -q "proxy-orchestrator"; then
+    if container_is_up proxy-orchestrator && container_is_up http-proxy; then
         print_success "Local proxy started"
     else
         print_error "Failed to start local proxy"
-        docker compose logs proxy-orchestrator
+        docker compose ps
+        docker compose logs --tail 30 orchestrator http-proxy
         exit 1
     fi
     
@@ -146,7 +153,7 @@ stop_proxy() {
     
     # Stop local containers first to prevent the orchestrator from
     # seeing the remote task disappear and trying to restart it.
-    if docker compose ps 2>/dev/null | grep -q "proxy-orchestrator"; then
+    if container_is_up proxy-orchestrator || container_is_up http-proxy; then
         print_info "Stopping Docker containers..."
         docker compose down
         print_success "Local proxy stopped"
@@ -169,16 +176,27 @@ show_status() {
     print_header "Proxy Status"
     
     # Check local containers
-    if docker compose ps | grep -q "proxy-orchestrator"; then
-        print_success "Local proxy: running"
+    LOCAL_OK=true
+    if container_is_up http-proxy; then
+        print_success "Local proxy (http-proxy): running"
     else
-        print_error "Local proxy: not running"
+        print_error "Local proxy (http-proxy): not running"
+        LOCAL_OK=false
+    fi
+    if container_is_up proxy-orchestrator; then
+        print_success "Orchestrator: running"
+    else
+        print_error "Orchestrator: not running"
+        LOCAL_OK=false
+    fi
+    if [ "$LOCAL_OK" = false ]; then
         return 1
     fi
     
     # Check Fargate task
     TASKS=$(aws ecs list-tasks \
         --cluster $ECS_CLUSTER \
+        --region $AWS_REGION \
         --desired-status RUNNING \
         --query 'taskArns' \
         --output text 2>/dev/null || echo "")
@@ -233,7 +251,7 @@ show_info() {
     echo -e "${BLUE}AWS Resources:${NC}"
     
     # List tasks
-    TASKS=$(aws ecs list-tasks --cluster $ECS_CLUSTER --query 'taskArns[]' --output text 2>/dev/null || echo "none")
+    TASKS=$(aws ecs list-tasks --cluster $ECS_CLUSTER --region $AWS_REGION --query 'taskArns[]' --output text 2>/dev/null || echo "none")
     TASK_COUNT=$(echo $TASKS | wc -w)
     echo "  Running tasks:      $TASK_COUNT"
     
@@ -257,7 +275,7 @@ check_health() {
     print_header "Health Check"
     
     # Test local proxy
-    if curl -s http://localhost:8080 >/dev/null 2>&1; then
+    if curl -s --max-time 5 http://localhost:8080 >/dev/null 2>&1; then
         print_success "Local proxy: responding"
     else
         print_error "Local proxy: not responding"
@@ -265,15 +283,15 @@ check_health() {
     fi
     
     # Test orchestrator API
-    if curl -s http://localhost:5000/status >/dev/null 2>&1; then
+    if curl -s --max-time 5 http://localhost:5000/status >/dev/null 2>&1; then
         print_success "Orchestrator: responding"
     else
         print_error "Orchestrator: not responding"
         return 1
     fi
     
-    # Test SOCKS5 through proxy
-    RESULT=$(curl -s -x http://localhost:8080 http://httpbin.org/ip 2>/dev/null || echo "{}")
+    # Test SOCKS5 through proxy (bounded so a stalled upstream can't hang us)
+    RESULT=$(curl -s --max-time 20 -x http://localhost:8080 http://httpbin.org/ip 2>/dev/null || echo "{}")
     if echo "$RESULT" | jq . >/dev/null 2>&1; then
         print_success "SOCKS5 proxy: responding"
         ORIGIN_IP=$(echo "$RESULT" | jq -r '.origin' 2>/dev/null)
