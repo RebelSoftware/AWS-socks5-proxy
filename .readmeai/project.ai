@@ -95,6 +95,14 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
   not responding" while the tunnel worked. Now tries httpbin.org/ip,
   api.ipify.org, and checkip.amazonaws.com in order, accepting JSON or
   plain-text IP responses.
+- `activeConnections` fix in `async-proxy/proxy.js`: cleanup was attached to
+  multiple socket events ('end'/'error'/'close' on both sockets) and could
+  decrement several times per connection, driving the counter negative
+  (observed -71). Cleanup is now idempotent via a per-connection flag; verified
+  the counter returns to 0 after requests.
+- `proxy-manage.sh status` now reports live activity state from the http-proxy
+  container: wake state, idle time (s/min/h), active connections, and the
+  configured idle timeout (from the orchestrator).
 
 ## Pending tasks
 

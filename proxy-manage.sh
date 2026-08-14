@@ -212,11 +212,34 @@ show_status() {
     ORCHESTRATOR_STATUS=$(curl -s http://localhost:5000/status 2>/dev/null || echo "{}")
     REMOTE_IP=$(echo $ORCHESTRATOR_STATUS | jq -r '.remote_ip // "unknown"' 2>/dev/null)
     
+    # Idle/activity info from the http-proxy container
+    PROXY_HEALTH=$(docker exec http-proxy wget -q -T 5 -O - http://127.0.0.1:8081/health 2>/dev/null || echo "{}")
+    WAKE_STATE=$(echo "$PROXY_HEALTH" | jq -r '.wakeState // "unknown"' 2>/dev/null)
+    IDLE_SECONDS=$(echo "$PROXY_HEALTH" | jq -r '.idleForSeconds // empty' 2>/dev/null)
+    ACTIVE_CONNS=$(echo "$PROXY_HEALTH" | jq -r '.activeConnections // 0' 2>/dev/null)
+    IDLE_TIMEOUT_MINS=$(echo "$ORCHESTRATOR_STATUS" | jq -r '.idle_timeout_minutes // "unknown"' 2>/dev/null)
+
+    if [[ "$IDLE_SECONDS" =~ ^[0-9]+$ ]]; then
+        if [ "$IDLE_SECONDS" -ge 3600 ]; then
+            IDLE_DISPLAY="$(awk "BEGIN {printf \"%.1f h\", $IDLE_SECONDS/3600}")"
+        elif [ "$IDLE_SECONDS" -ge 60 ]; then
+            IDLE_DISPLAY="$(awk "BEGIN {printf \"%.1f min\", $IDLE_SECONDS/60}")"
+        else
+            IDLE_DISPLAY="${IDLE_SECONDS}s"
+        fi
+    else
+        IDLE_DISPLAY="unknown"
+    fi
+
     echo ""
     echo -e "${BLUE}Configuration:${NC}"
     echo "  Local proxy:     localhost:8080"
     echo "  Remote IP:       $REMOTE_IP"
     echo "  Task ARN:        $(echo $ORCHESTRATOR_STATUS | jq -r '.remote_task // "unknown"' 2>/dev/null)"
+    echo "  Wake state:      $WAKE_STATE"
+    echo "  Idle for:        $IDLE_DISPLAY"
+    echo "  Active conns:    $ACTIVE_CONNS"
+    echo "  Idle timeout:    ${IDLE_TIMEOUT_MINS} min"
     echo ""
     echo -e "${BLUE}Quick Test:${NC}"
     echo "  curl -x http://localhost:8080 http://httpbin.org/ip"

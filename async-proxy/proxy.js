@@ -203,6 +203,17 @@ class DynamicProxy {
 
             this.activeConnections++;
 
+            // Idempotent cleanup — 'end', 'error' and 'close' can all fire
+            // for one connection; decrement the counter only once.
+            let cleanedUp = false;
+            const cleanup = () => {
+                if (cleanedUp) return;
+                cleanedUp = true;
+                this.activeConnections--;
+                try { proxySocket.destroy(); } catch (e) {}
+                try { clientReq.destroy(); } catch (e) {}
+            };
+
             // Build raw HTTP request and send through SOCKS5 tunnel
             const requestLine = `${clientReq.method} ${targetUrl.pathname}${targetUrl.search} HTTP/1.1\r\n`;
             let rawRequest = requestLine;
@@ -280,12 +291,6 @@ class DynamicProxy {
 
             clientReq.on('error', () => cleanup());
 
-            const cleanup = () => {
-                this.activeConnections--;
-                try { proxySocket.destroy(); } catch (e) {}
-                try { clientReq.destroy(); } catch (e) {}
-            };
-
             proxySocket.on('close', cleanup);
             clientReq.on('close', cleanup);
 
@@ -357,8 +362,12 @@ class DynamicProxy {
                 remoteSocket.write(head);
             }
 
-            // Bidirectional pipe
+            // Idempotent cleanup — multiple 'error'/'close' events can fire
+            // for one connection; decrement the counter only once.
+            let cleanedUp = false;
             const cleanup = () => {
+                if (cleanedUp) return;
+                cleanedUp = true;
                 this.activeConnections--;
                 try {
                     clientSocket.destroy();
