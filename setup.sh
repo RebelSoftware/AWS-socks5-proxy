@@ -53,6 +53,80 @@ fi
 print_success "Docker Compose installed"
 
 # Verify AWS credentials
+print_header "Verifying AWS Credentials"
+
+# Detect configured AWS profiles so the user can choose which identity to use
+# (e.g. a profile with S3-only access vs. an admin profile with full access).
+AWS_PROFILES=$(aws configure list-profiles 2>/dev/null | sort)
+HAS_ENV_CREDS="false"
+if [ -n "$AWS_ACCESS_KEY_ID" ] || [ -n "$AWS_SESSION_TOKEN" ]; then
+    HAS_ENV_CREDS="true"
+fi
+
+if [ -n "$AWS_PROFILES" ]; then
+    PROFILE_COUNT=$(printf '%s\n' "$AWS_PROFILES" | grep -c .)
+
+    if [ "$PROFILE_COUNT" -eq 1 ] && [ "$HAS_ENV_CREDS" != "true" ]; then
+        SELECTED_PROFILE=$(printf '%s\n' "$AWS_PROFILES" | head -n1)
+        print_info "Only one AWS profile found — using '$SELECTED_PROFILE'"
+        export AWS_PROFILE="$SELECTED_PROFILE"
+        unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    else
+        echo ""
+        print_info "Choose the AWS profile to use for deployment. Make sure it"
+        print_info "has permissions to create CloudFormation stacks and IAM users."
+        echo ""
+        echo "Available profiles:"
+        PROFILE_INDEX=1
+        DEFAULT_PROFILE_CHOICE=""
+        while IFS= read -r prof; do
+            echo "  ${PROFILE_INDEX}) $prof"
+            if [ -n "$AWS_PROFILE" ] && [ "$prof" = "$AWS_PROFILE" ]; then
+                DEFAULT_PROFILE_CHOICE="$PROFILE_INDEX"
+            fi
+            PROFILE_INDEX=$((PROFILE_INDEX + 1))
+        done <<< "$AWS_PROFILES"
+
+        if [ "$HAS_ENV_CREDS" = "true" ]; then
+            echo "  0) Use current environment credentials (no profile)"
+            CHOICE_MIN=0
+            DEFAULT_PROFILE_CHOICE="0"
+        else
+            CHOICE_MIN=1
+        fi
+        echo ""
+        if [ -n "$DEFAULT_PROFILE_CHOICE" ]; then
+            read -p "Select a profile [${CHOICE_MIN}-${PROFILE_COUNT}] (default: ${DEFAULT_PROFILE_CHOICE}): " PROFILE_CHOICE
+            PROFILE_CHOICE="${PROFILE_CHOICE:-$DEFAULT_PROFILE_CHOICE}"
+        else
+            read -p "Select a profile [${CHOICE_MIN}-${PROFILE_COUNT}]: " PROFILE_CHOICE
+        fi
+
+        VALID="false"
+        while [ "$VALID" != "true" ]; do
+            if [[ "$PROFILE_CHOICE" =~ ^[0-9]+$ ]] && \
+               [ "$PROFILE_CHOICE" -ge "$CHOICE_MIN" ] && \
+               [ "$PROFILE_CHOICE" -le "$PROFILE_COUNT" ]; then
+                VALID="true"
+            else
+                print_error "Invalid choice."
+                read -p "Select a profile [${CHOICE_MIN}-${PROFILE_COUNT}]: " PROFILE_CHOICE
+            fi
+        done
+
+        if [ "$PROFILE_CHOICE" -eq 0 ]; then
+            print_info "Using current environment credentials"
+        else
+            SELECTED_PROFILE=$(printf '%s\n' "$AWS_PROFILES" | sed -n "${PROFILE_CHOICE}p")
+            print_success "Using AWS profile: $SELECTED_PROFILE"
+            export AWS_PROFILE="$SELECTED_PROFILE"
+            unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+        fi
+    fi
+else
+    print_info "No named AWS profiles found — using environment or default credentials."
+fi
+
 print_info "Verifying AWS credentials..."
 if ! aws sts get-caller-identity > /dev/null 2>&1; then
     print_error "AWS credentials not configured"
@@ -487,19 +561,24 @@ fi
 export AWS_ACCESS_KEY_ID="${SAVED_AWS_ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY="${SAVED_AWS_SECRET_ACCESS_KEY}"
 export AWS_SESSION_TOKEN="${SAVED_AWS_SESSION_TOKEN}"
-unset AWS_PROFILE
+if [ -n "$SAVED_AWS_PROFILE" ]; then
+    export AWS_PROFILE="$SAVED_AWS_PROFILE"
+else
+    unset AWS_PROFILE
+fi
 
 # Verify we still have admin access
 CALLER_ID=$(aws sts get-caller-identity 2>/dev/null || echo "")
 if [ -z "$CALLER_ID" ]; then
-    # If env vars were unset, try default profile
+    # If the saved identity is unusable, fall back to the default profile
     unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-    export AWS_PROFILE="${SAVED_AWS_PROFILE:-default}"
-    CALLER_ID=$(aws sts get-caller-identity) || {
+    export AWS_PROFILE="default"
+    CALLER_ID=$(aws sts get-caller-identity 2>/dev/null || echo "")
+    if [ -z "$CALLER_ID" ]; then
         print_error "AWS credentials lost during setup"
         echo "Re-run with valid AWS credentials (e.g., aws configure)"
         exit 1
-    }
+    fi
 fi
 echo "Caller ARN: $(echo $CALLER_ID | jq -r '.Arn')"
 

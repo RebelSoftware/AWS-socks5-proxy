@@ -67,6 +67,10 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
   AWS operations setup needs (cloudformation:CreateStack, iam:CreateUser, etc.)
   via `iam simulate-principal-policy`, with a live-probe fallback when
   simulation is not permitted.
+- `setup.sh` AWS profile selection: detects profiles via
+  `aws configure list-profiles` and asks the user which to use (auto-selects
+  when only one exists). Env-var credentials remain an option; the mid-script
+  credential restore now honors the chosen profile.
 
 ## Pending tasks
 
