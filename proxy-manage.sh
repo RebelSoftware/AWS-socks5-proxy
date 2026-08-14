@@ -65,7 +65,7 @@ start_proxy() {
     else
         print_error "Failed to start local proxy"
         docker compose ps
-        docker compose logs --tail 30 orchestrator http-proxy
+        docker compose logs --tail 30 proxy-orchestrator http-proxy
         exit 1
     fi
     
@@ -96,7 +96,7 @@ start_proxy() {
     done
     
     print_error "Fargate task failed to initialize"
-    docker compose logs proxy-orchestrator
+    docker compose logs --tail 50 proxy-orchestrator http-proxy
     exit 1
 }
 
@@ -225,12 +225,17 @@ show_status() {
 show_logs() {
     print_header "Proxy Logs"
     
-    echo -e "${BLUE}Local Proxy Logs:${NC}"
+    echo -e "${BLUE}Local Proxy Logs (http-proxy):${NC}"
+    docker compose logs http-proxy
+    
+    echo ""
+    echo -e "${BLUE}Orchestrator Logs:${NC}"
     docker compose logs proxy-orchestrator
     
     echo ""
     echo -e "${BLUE}Fargate Task Logs (last 50 lines):${NC}"
     aws logs tail /ecs/proxy-socks5-proxy \
+        --region "$AWS_REGION" \
         --max-items 50 \
         2>/dev/null || print_info "No Fargate logs yet"
 }

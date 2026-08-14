@@ -84,6 +84,12 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
   containers by real run state via `docker inspect` (name-matching
   `docker compose ps` counts a "Created" container as running), and ECS calls
   pass `--region "$AWS_REGION"` explicitly.
+- `proxy-manage.sh logs` fix + Compose rename: the orchestrator service was
+  named `orchestrator` while the script used the container name
+  `proxy-orchestrator` ("no such service"). Renamed the Compose service to
+  `proxy-orchestrator` for clarity and consistency; `logs` prints `http-proxy`
+  and `proxy-orchestrator` logs separately and passes `--region` to
+  `aws logs tail`.
 
 ## Pending tasks
 
