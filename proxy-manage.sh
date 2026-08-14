@@ -276,6 +276,32 @@ show_info() {
     echo ""
 }
 
+# Return the proxy's outbound IP by trying several IP echo services.
+# Any single service (e.g. httpbin.org) may be down — that does not mean the
+# proxy is broken. Prints the IP on success, nothing on failure.
+get_proxy_origin_ip() {
+    for IP_URL in \
+        "http://httpbin.org/ip" \
+        "https://api.ipify.org" \
+        "https://checkip.amazonaws.com"; do
+        RESPONSE=$(curl -s --max-time 10 -x http://localhost:8080 "$IP_URL" 2>/dev/null || true)
+        # JSON services: {"origin":"1.2.3.4"} or {"ip":"1.2.3.4"}
+        IP=$(echo "$RESPONSE" | jq -r '.origin // .ip // empty' 2>/dev/null | tr -d '[:space:]')
+        if [ -z "$IP" ]; then
+            # Plain-text services: response is just the IP
+            IP=$(echo "$RESPONSE" | tr -d '[:space:]')
+            if ! echo "$IP" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+                IP=""
+            fi
+        fi
+        if [ -n "$IP" ]; then
+            echo "$IP"
+            return 0
+        fi
+    done
+    return 1
+}
+
 check_health() {
     print_header "Health Check"
     
@@ -295,14 +321,12 @@ check_health() {
         return 1
     fi
     
-    # Test SOCKS5 through proxy (bounded so a stalled upstream can't hang us)
-    RESULT=$(curl -s --max-time 20 -x http://localhost:8080 http://httpbin.org/ip 2>/dev/null || echo "{}")
-    if echo "$RESULT" | jq . >/dev/null 2>&1; then
+    # Test SOCKS5 through proxy (bounded so a stalled upstream can't hang us,
+    # and resilient to any single echo service being down)
+    ORIGIN_IP=$(get_proxy_origin_ip || echo "")
+    if [ -n "$ORIGIN_IP" ]; then
         print_success "SOCKS5 proxy: responding"
-        ORIGIN_IP=$(echo "$RESULT" | jq -r '.origin' 2>/dev/null)
-        if [ ! -z "$ORIGIN_IP" ]; then
-            echo "  Your external IP: $ORIGIN_IP"
-        fi
+        echo "  Your external IP: $ORIGIN_IP"
     else
         print_error "SOCKS5 proxy: not responding"
         return 1

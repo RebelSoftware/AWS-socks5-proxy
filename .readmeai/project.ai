@@ -90,6 +90,11 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
   `proxy-orchestrator` for clarity and consistency; `logs` prints `http-proxy`
   and `proxy-orchestrator` logs separately and passes `--region` to
   `aws logs tail`.
+- `proxy-manage.sh health` resilience: the SOCKS5 test used httpbin.org/ip as
+  its only echo service, so an httpbin outage falsely reported "SOCKS5 proxy:
+  not responding" while the tunnel worked. Now tries httpbin.org/ip,
+  api.ipify.org, and checkip.amazonaws.com in order, accepting JSON or
+  plain-text IP responses.
 
 ## Pending tasks
 
