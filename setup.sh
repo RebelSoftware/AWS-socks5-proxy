@@ -67,6 +67,101 @@ print_info "Detecting AWS region..."
 REGION=$(aws configure get region || echo "us-east-1")
 echo "Using region: $REGION"
 
+# Verify IAM permissions for every AWS operation setup.sh needs to run.
+# Keep this list in sync with the aws CLI commands used later in this script.
+print_header "Verifying AWS Permissions"
+
+REQUIRED_ACTIONS=(
+    "cloudformation:CreateStack:create the CloudFormation stack"
+    "cloudformation:UpdateStack:update the CloudFormation stack"
+    "cloudformation:DescribeStacks:read stack status"
+    "cloudformation:DescribeStackEvents:read stack events (used while waiting)"
+    "cloudformation:DescribeStackResources:read stack resources"
+    "iam:ListRoles:look up IAM roles created by the stack"
+    "iam:CreateUser:create the orchestrator IAM user"
+    "iam:PutUserPolicy:attach the orchestrator permissions policy"
+    "iam:ListAccessKeys:list orchestrator access keys"
+    "iam:DeleteAccessKey:rotate orchestrator access keys"
+    "iam:CreateAccessKey:create orchestrator access keys"
+)
+
+CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text)
+
+# The AWS account root user always has full permissions — nothing to check
+if [[ "$CALLER_ARN" =~ ^arn:aws:iam::[0-9]+:root$ ]]; then
+    print_success "Running as AWS account root — full permissions"
+else
+    print_info "Checking IAM permissions for: $CALLER_ARN"
+
+    # Best-effort simulation of every required action against this identity.
+    # Falls back to live probes if simulation itself is not permitted.
+    SIMULATION_UNAVAILABLE="false"
+    MISSING=()
+    for entry in "${REQUIRED_ACTIONS[@]}"; do
+        action="${entry%%:*}"
+        desc="${entry#*:}"
+        decision=$(aws iam simulate-principal-policy \
+            --policy-source-arn "$CALLER_ARN" \
+            --action-names "$action" \
+            --query 'EvaluationResults[0].EvalDecision' \
+            --output text 2>/dev/null) || SIMULATION_UNAVAILABLE="true"
+        if [ "$SIMULATION_UNAVAILABLE" = "true" ]; then
+            break
+        fi
+        if [ "$decision" != "allowed" ]; then
+            MISSING+=("$action:$desc")
+        fi
+    done
+
+    if [ "$SIMULATION_UNAVAILABLE" = "true" ]; then
+        print_info "IAM policy simulation is not permitted for these credentials."
+        print_info "Running harmless live API probes instead..."
+
+        PROBE_MISSING=()
+        if ! aws cloudformation describe-stacks --region "$REGION" --max-items 1 > /dev/null 2>&1; then
+            PROBE_MISSING+=("cloudformation:DescribeStacks")
+        fi
+        if ! aws cloudformation validate-template --region "$REGION" --template-body file://fargate-infrastructure.yaml > /dev/null 2>&1; then
+            PROBE_MISSING+=("cloudformation:ValidateTemplate")
+        fi
+        if ! aws iam list-roles --max-items 1 > /dev/null 2>&1; then
+            PROBE_MISSING+=("iam:ListRoles")
+        fi
+
+        if [ ${#PROBE_MISSING[@]} -gt 0 ]; then
+            print_error "The following permissions could not be verified:"
+            for action in "${PROBE_MISSING[@]}"; do
+                echo "   ✗ $action"
+            done
+            echo ""
+            echo "Grant the missing permissions (e.g. AdministratorAccess) to"
+            echo "$CALLER_ARN and re-run ./setup.sh"
+            exit 1
+        fi
+
+        echo ""
+        print_info "Write permissions (cloudformation:CreateStack, iam:CreateUser, etc.)"
+        print_info "cannot be tested without making real changes."
+        read -p "Continue with setup anyway? [y/N]: " CONTINUE_ANYWAY
+        if [[ ! "$CONTINUE_ANYWAY" =~ ^[Yy]$ ]]; then
+            echo "Aborted. Grant AdministratorAccess or the required IAM"
+            echo "permissions and re-run ./setup.sh"
+            exit 1
+        fi
+    elif [ ${#MISSING[@]} -gt 0 ]; then
+        print_error "The following IAM permissions are missing:"
+        for entry in "${MISSING[@]}"; do
+            echo "   ✗ ${entry%%:*} — ${entry#*:}"
+        done
+        echo ""
+        echo "Grant the missing permissions (e.g. AdministratorAccess) to"
+        echo "$CALLER_ARN and re-run ./setup.sh"
+        exit 1
+    else
+        print_success "All required IAM permissions verified"
+    fi
+fi
+
 # Detect local public IP for IP allowlist
 print_header "Detecting Public IP"
 

@@ -63,7 +63,14 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
 - Full documentation set (README, QUICKSTART, DEPLOYMENT, architecture,
   security docs).
 - `.readmeai/` project context files created (this file + `system.ai`).
+- `setup.sh` IAM permission pre-flight check: verifies the caller can run the
+  AWS operations setup needs (cloudformation:CreateStack, iam:CreateUser, etc.)
+  via `iam simulate-principal-policy`, with a live-probe fallback when
+  simulation is not permitted.
 
 ## Pending tasks
 
-- (None currently recorded — add tasks here as they arise.)
+- (Optional) Document the required admin IAM permissions in DEPLOYMENT.md so
+  users know what to grant before running `setup.sh`.
+- (Optional) Add a `jq` prerequisite check to `setup.sh` (it is used later in
+  the script but not validated up front).
