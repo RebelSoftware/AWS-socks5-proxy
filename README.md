@@ -81,7 +81,16 @@ task. The remote can be started later in a few ways:
 - `curl -X POST http://localhost:5000/start` — start the remote immediately.
 - `./proxy-manage.sh start` — recreate containers with auto-start enabled.
 
-You can also set `AUTO_START_REMOTE=false` in `.env` to make this the default for all `start` calls.
+You can also set `AUTO_START_REMOTE=false` in `.env` to make it the default for direct
+`docker compose up` invocations. (`./proxy-manage.sh start` always defaults to auto-start;
+use the `--no-remote` flag to override it for a single run.)
+
+> **Survives restarts:** when you start with `--no-remote`, the `AUTO_START_REMOTE=false` value is
+> baked into the `proxy-orchestrator` container's environment at creation, so a host reboot or a
+> Docker auto-restart (`restart: unless-stopped`) keeps the remote **off** — the remote is not
+> started unnecessarily. The value only reverts to `true` if the container is recreated by a plain
+> `./proxy-manage.sh start` (or `docker compose up -d`) without the flag. Run
+> `./proxy-manage.sh status` to see the baked-in value under "Remote auto-start".
 
 ---
 

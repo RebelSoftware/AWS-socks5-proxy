@@ -123,6 +123,11 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
 - Docs updated for `--no-remote`/`AUTO_START_REMOTE`: `README.md` (daily usage
   + a "Start without the remote task" section) and `QUICKSTART.md`.
   `.env.example` now documents `AUTO_START_REMOTE`.
+- Verified flag persistence across container restarts: `AUTO_START_REMOTE=false`
+  is baked into the orchestrator container env at creation and survives
+  `docker restart` / host reboot (compose only reverts to `true` if a plain
+  `docker compose up -d` recreates the container). `proxy-manage.sh status` now
+  shows the baked-in "Remote auto-start" value from the running container.
 
 ## Pending tasks
 

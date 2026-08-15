@@ -245,6 +245,14 @@ show_status() {
     ACTIVE_CONNS=$(echo "$PROXY_HEALTH" | jq -r '.activeConnections // 0' 2>/dev/null)
     IDLE_TIMEOUT_MINS=$(echo "$ORCHESTRATOR_STATUS" | jq -r '.idle_timeout_minutes // "unknown"' 2>/dev/null)
 
+    # AUTO_START_REMOTE baked into the orchestrator container at creation — this
+    # is the value that survives container restarts (host reboot, crash, etc.),
+    # so it shows whether the remote will auto-start after a restart.
+    ORCH_AUTO_START=$(docker inspect proxy-orchestrator \
+        --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+        | grep '^AUTO_START_REMOTE=' | cut -d= -f2 | tail -1)
+    ORCH_AUTO_START="${ORCH_AUTO_START:-true}"
+
     if [[ "$IDLE_SECONDS" =~ ^[0-9]+$ ]]; then
         if [ "$IDLE_SECONDS" -ge 3600 ]; then
             IDLE_DISPLAY="$(awk "BEGIN {printf \"%.1f h\", $IDLE_SECONDS/3600}")"
@@ -266,6 +274,7 @@ show_status() {
     echo "  Idle for:        $IDLE_DISPLAY"
     echo "  Active conns:    $ACTIVE_CONNS"
     echo "  Idle timeout:    ${IDLE_TIMEOUT_MINS} min"
+    echo "  Remote auto-start: $ORCH_AUTO_START   # survives container restarts"
     echo ""
     echo -e "${BLUE}Quick Test:${NC}"
     echo "  curl -x http://localhost:8080 http://httpbin.org/ip"
