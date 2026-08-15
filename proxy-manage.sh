@@ -225,7 +225,7 @@ show_status() {
         elif [ "$IDLE_SECONDS" -ge 60 ]; then
             IDLE_DISPLAY="$(awk "BEGIN {printf \"%.1f min\", $IDLE_SECONDS/60}")"
         else
-            IDLE_DISPLAY="${IDLE_SECONDS}s"
+            IDLE_DISPLAY="${IDLE_SECONDS} s"
         fi
     else
         IDLE_DISPLAY="unknown"

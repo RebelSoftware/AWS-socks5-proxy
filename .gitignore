@@ -64,3 +64,4 @@ test.json
 # local bash history
 # ──────────────────────────────────────────────
 .bash_history_local
+.bash_history_local.dedup
