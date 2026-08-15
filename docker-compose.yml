@@ -58,6 +58,10 @@ services:
       # Idle timeout — remote proxy shuts down after this many minutes of inactivity
       - TASK_IDLE_TIMEOUT_MINUTES=${TASK_IDLE_TIMEOUT_MINUTES:-60}
       - HTTP_PROXY_HEALTH_URL=${HTTP_PROXY_HEALTH_URL:-http://http-proxy:8081/health}
+      # Auto-start remote Fargate task. Set false via `./proxy-manage.sh start --no-remote`
+      # (or by adding AUTO_START_REMOTE=false to .env) to run the local proxy
+      # without starting the remote SOCKS5 proxy automatically.
+      - AUTO_START_REMOTE=${AUTO_START_REMOTE:-true}
     env_file:
       - .env
     networks:

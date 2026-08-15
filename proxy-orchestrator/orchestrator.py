@@ -53,6 +53,13 @@ DUAL_IP_RETENTION_MINUTES = int(os.getenv('DUAL_IP_RETENTION_MINUTES', '180'))
 TASK_IDLE_TIMEOUT_MINUTES = int(os.getenv('TASK_IDLE_TIMEOUT_MINUTES', '60'))
 HTTP_PROXY_HEALTH_URL = os.getenv('HTTP_PROXY_HEALTH_URL', 'http://http-proxy:8081/health')
 
+# Auto-start remote Fargate task.
+# When false (e.g. `./proxy-manage.sh start --no-remote`), the orchestrator
+# never starts a task on its own (neither at boot nor in the monitor loop).
+# The remote is only started on demand via POST /start (or wake-on-demand
+# from the local http-proxy when actual traffic arrives).
+AUTO_START_REMOTE = os.getenv('AUTO_START_REMOTE', 'true').lower() == 'true'
+
 # Validation
 if not TASK_SUBNET:
     logger.error("TASK_SUBNET environment variable not set")
@@ -75,6 +82,7 @@ if IP_ALLOWLIST_ENABLED:
     logger.info(f"  DUAL_IP_RETENTION_MINUTES: {DUAL_IP_RETENTION_MINUTES}")
 logger.info(f"  TASK_IDLE_TIMEOUT_MINUTES: {TASK_IDLE_TIMEOUT_MINUTES}")
 logger.info(f"  HTTP_PROXY_HEALTH_URL: {HTTP_PROXY_HEALTH_URL}")
+logger.info(f"  AUTO_START_REMOTE: {AUTO_START_REMOTE}")
 
 
 
@@ -101,6 +109,9 @@ class FargateProxyOrchestrator:
         self.idle_mode = False
         self.explicit_stop = False
         self.last_activity_at = None  # Timestamp of last proxy activity (from http-proxy health)
+        
+        # Whether the orchestrator may auto-start remote Fargate tasks
+        self.auto_start_remote = AUTO_START_REMOTE
         
         # IP allowlist tracking for dual-IP support
         self.local_public_ip = None
@@ -524,8 +535,14 @@ class FargateProxyOrchestrator:
         except Exception as e:
             logger.error(f"Error checking/updating IP: {e}", exc_info=True)
     
-    def ensure_task_running(self):
-        """Ensure we have a running task with public IP"""
+    def ensure_task_running(self, auto_start=True):
+        """Ensure we have a running task with public IP.
+
+        When auto_start is False (used by the background monitor when the user
+        started with --no-remote), a new Fargate task is NEVER started here —
+        returns None if none is already running. Explicit user actions
+        (POST /start, POST /wake) always call with auto_start=True.
+        """
         try:
             logger.debug("Ensuring task is running...")
             tasks = self.get_running_tasks()
@@ -549,6 +566,9 @@ class FargateProxyOrchestrator:
                     logger.warning(f"Running task found but no public IP yet, waiting...")
                     return self.wait_for_task_ip()
             else:
+                if not auto_start:
+                    logger.info("No running tasks found and auto-start is disabled — not starting a new task")
+                    return None
                 logger.info("No running tasks found, starting new one...")
                 if self.start_new_task():
                     return self.wait_for_task_ip()
@@ -931,8 +951,8 @@ def monitor_task():
                 time.sleep(check_interval)
                 continue
             
-            # Ensure we have a running task
-            current_ip = orchestrator.ensure_task_running()
+            # Ensure we have a running task (never auto-start when --no-remote)
+            current_ip = orchestrator.ensure_task_running(auto_start=orchestrator.auto_start_remote)
             
             # Check if task IP changed
             if current_ip and current_ip != previous_ip:

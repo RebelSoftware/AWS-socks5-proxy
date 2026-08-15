@@ -1,6 +1,6 @@
 #!/bin/bash
 # Management script for Fargate SOCKS5 proxy
-# Usage: ./proxy-manage.sh [start|stop|stop --remote|status|logs|info]
+# Usage: ./proxy-manage.sh [start|start --no-remote|stop|stop --remote|status|logs|info]
 
 set -e
 
@@ -48,13 +48,27 @@ container_is_up() {
 start_proxy() {
     print_header "Starting Proxy"
     
+    # Parse optional --no-remote flag
+    # When set, the local proxy starts WITHOUT auto-starting the remote Fargate
+    # SOCKS5 task (saves cost when the proxy is not needed immediately). The
+    # remote can still be started on demand later (POST /start, or traffic
+    # through the local proxy will trigger wake-on-demand).
+    AUTO_START_REMOTE=true
+    for arg in "$@"; do
+        case "$arg" in
+            --no-remote|-n)
+                AUTO_START_REMOTE=false
+                ;;
+        esac
+    done
+    
     if ! command -v docker &> /dev/null; then
         print_error "Docker not installed"
         exit 1
     fi
     
     print_info "Starting Docker containers..."
-    docker compose up -d
+    AUTO_START_REMOTE=$AUTO_START_REMOTE docker compose up -d
     
     print_info "Waiting for orchestrator to initialize..."
     sleep 5
@@ -67,6 +81,18 @@ start_proxy() {
         docker compose ps
         docker compose logs --tail 30 proxy-orchestrator http-proxy
         exit 1
+    fi
+    
+    # If remote auto-start is disabled, we're done — do not wait for Fargate
+    if [ "$AUTO_START_REMOTE" = false ]; then
+        print_success "Remote SOCKS5 proxy NOT started (--no-remote)"
+        echo ""
+        echo -e "${GREEN}Start the remote later when needed:${NC}"
+        echo "  ./proxy-manage.sh start                  # recreates containers, auto-starts remote"
+        echo "  curl -X POST http://localhost:5000/start # start remote now, no container recreation"
+        echo ""
+        echo -e "${BLUE}Note:${NC} traffic sent through localhost:8080 will wake the remote on demand."
+        return 0
     fi
     
     # Wait for Fargate task to be ready
@@ -359,7 +385,9 @@ check_health() {
 # Main
 case "${1:-status}" in
     start)
-        start_proxy
+        # Pass any additional arguments (e.g., --no-remote) to start_proxy
+        shift 1
+        start_proxy "$@"
         ;;
     stop)
         # Pass any additional arguments (e.g., --remote) to stop_proxy
@@ -385,6 +413,7 @@ case "${1:-status}" in
         echo ""
         echo "Commands:"
         echo "  start    - Start local proxy and orchestrate Fargate task"
+        echo "  start --no-remote - Start local proxy WITHOUT auto-starting remote Fargate task"
         echo "  stop     - Stop local proxy (Fargate auto-shuts down after idle)"
         echo "  stop --remote - Stop local proxy AND remote Fargate task immediately"
         echo "  status   - Show proxy status and configuration"

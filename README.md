@@ -65,12 +65,31 @@ Internet (with your AWS region's IP)
 
 Browser always connects to `localhost:8080` — no reconfiguration needed between sessions.
 
+### Start without the remote task (`--no-remote`)
+
+If you want the local proxy service running but don't need the remote SOCKS5 proxy right now
+(e.g. to avoid paying for a running Fargate task), start with:
+
+```bash
+./proxy-manage.sh start --no-remote
+```
+
+This starts `http-proxy` and `proxy-orchestrator` locally but **does not** start the Fargate
+task. The remote can be started later in a few ways:
+
+- Send traffic through `localhost:8080` — the proxy wakes the remote on demand.
+- `curl -X POST http://localhost:5000/start` — start the remote immediately.
+- `./proxy-manage.sh start` — recreate containers with auto-start enabled.
+
+You can also set `AUTO_START_REMOTE=false` in `.env` to make this the default for all `start` calls.
+
 ---
 
 ## Daily Usage
 
 ```bash
 ./proxy-manage.sh start              # Start (waits ~30–60s for Fargate init)
+./proxy-manage.sh start --no-remote  # Start local proxy only — do NOT auto-start remote Fargate task
 ./proxy-manage.sh stop               # Stop local proxy (Fargate auto-shuts down)
 ./proxy-manage.sh stop --remote      # Stop local proxy + stop Fargate task immediately
 ./proxy-manage.sh status             # Current status & IP

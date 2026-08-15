@@ -30,6 +30,16 @@ Wait ~30-60 seconds for Fargate to initialize. Output will show:
 ✓ Public IP: 12.34.56.78
 ```
 
+**Don't need the remote right now?** Start the local service without the Fargate task
+(saves cost until you actually use it):
+
+```bash
+./proxy-manage.sh start --no-remote
+```
+
+The remote will start on demand when traffic hits `localhost:8080`, or run
+`curl -X POST http://localhost:5000/start` to start it manually.
+
 ### Step 3: Configure Browser
 
 | Setting | Value |
@@ -53,6 +63,7 @@ Should show an IP from your chosen AWS region!
 
 ```bash
 ./proxy-manage.sh start              # Start proxy
+./proxy-manage.sh start --no-remote  # Start local proxy without auto-starting remote Fargate task
 ./proxy-manage.sh stop               # Stop local containers
 ./proxy-manage.sh stop --remote      # Stop local + Fargate immediately
 ./proxy-manage.sh status             # Show status

@@ -731,6 +731,11 @@ LOCAL_PROXY_PORT=8080
 SOCKS5_PORT=1080
 TASK_IDLE_TIMEOUT_MINUTES=$TASK_IDLE_TIMEOUT_MINUTES
 
+# Remote task auto-start: true (default) = ./proxy-manage.sh start also starts
+# the remote Fargate task. Set to false to run the local proxy only.
+# NOTE: ./proxy-manage.sh start --no-remote always overrides this for a single run.
+AUTO_START_REMOTE=${AUTO_START_REMOTE:-true}
+
 # Proxy authentication configuration
 REQUIRE_AUTH=${REQUIRE_AUTH:-false}
 PROXY_USER=${PROXY_USER:-}
