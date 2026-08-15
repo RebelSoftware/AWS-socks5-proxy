@@ -36,7 +36,7 @@ Creates VPC, ECS cluster, security groups, and auto-shutdown Lambda.
 
 ```bash
 ENVIRONMENT_NAME="proxy"
-IDLE_TIMEOUT_MINUTES=60
+TASK_IDLE_TIMEOUT_MINUTES=60
 YOUR_PUBLIC_IP=$(curl -s https://checkip.amazonaws.com)
 
 aws cloudformation create-stack \
@@ -44,7 +44,7 @@ aws cloudformation create-stack \
   --template-body file://fargate-infrastructure.yaml \
   --parameters \
     ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME} \
-    ParameterKey=TaskIdleTimeoutMinutes,ParameterValue=${IDLE_TIMEOUT_MINUTES} \
+    ParameterKey=TaskIdleTimeoutMinutes,ParameterValue=${TASK_IDLE_TIMEOUT_MINUTES} \
     ParameterKey=IPAllowlistEnabled,ParameterValue=true \
     ParameterKey=ClientPublicIP,ParameterValue="${YOUR_PUBLIC_IP}/32" \
   --capabilities CAPABILITY_NAMED_IAM
@@ -58,7 +58,7 @@ aws cloudformation create-stack \
   --template-body file://fargate-infrastructure.yaml \
   --parameters \
     ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME} \
-    ParameterKey=TaskIdleTimeoutMinutes,ParameterValue=${IDLE_TIMEOUT_MINUTES} \
+    ParameterKey=TaskIdleTimeoutMinutes,ParameterValue=${TASK_IDLE_TIMEOUT_MINUTES} \
     ParameterKey=IPAllowlistEnabled,ParameterValue=false \
     ParameterKey=ProxyUsername,ParameterValue=myuser \
     ParameterKey=ProxyPassword,ParameterValue=mypassword \
@@ -89,7 +89,7 @@ TASK_SUBNET=$SUBNET_ID
 TASK_SECURITY_GROUP=$SG_ID
 LOCAL_PROXY_PORT=8080
 SOCKS5_PORT=1080
-IDLE_TIMEOUT_MINUTES=60
+TASK_IDLE_TIMEOUT_MINUTES=60
 
 # IP Allowlist
 IP_ALLOWLIST_ENABLED=true

@@ -314,7 +314,7 @@ Resources:
       Environment:
         Variables:
           CLUSTER_NAME: !Ref ProxyCluster
-          IDLE_TIMEOUT_MINUTES: !Ref TaskIdleTimeoutMinutes
+          TASK_IDLE_TIMEOUT_MINUTES: !Ref TaskIdleTimeoutMinutes
           LOG_GROUP_NAME: !Ref TaskLogGroup
       Code:
         ZipFile: |
@@ -327,7 +327,7 @@ Resources:
           logs = boto3.client('logs')
           
           CLUSTER_NAME = os.environ['CLUSTER_NAME']
-          IDLE_TIMEOUT_MINUTES = int(os.environ['IDLE_TIMEOUT_MINUTES'])
+          TASK_IDLE_TIMEOUT_MINUTES = int(os.environ['TASK_IDLE_TIMEOUT_MINUTES'])
           LOG_GROUP = os.environ['LOG_GROUP_NAME']
           
           def lambda_handler(event, context):
@@ -363,7 +363,7 @@ Resources:
                           log_response = logs.filter_log_events(
                               logGroupName=LOG_GROUP,
                               logStreamNamePrefix=log_stream,
-                              startTime=int((datetime.now() - timedelta(minutes=IDLE_TIMEOUT_MINUTES)).timestamp() * 1000)
+                              startTime=int((datetime.now() - timedelta(minutes=TASK_IDLE_TIMEOUT_MINUTES)).timestamp() * 1000)
                           )
                           
                           if log_response.get('events'):
@@ -377,7 +377,7 @@ Resources:
                       created_time = task['createdAt'].replace(tzinfo=None)
                       task_age = (datetime.utcnow() - created_time).total_seconds() / 60
                       
-                      if task_age > IDLE_TIMEOUT_MINUTES:
+                      if task_age > TASK_IDLE_TIMEOUT_MINUTES:
                           print(f"Stopping inactive task {task_id} (age: {task_age} minutes)")
                           ecs.stop_task(
                               cluster=CLUSTER_NAME,

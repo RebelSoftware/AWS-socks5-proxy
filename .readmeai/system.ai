@@ -31,7 +31,7 @@ local Node.js HTTP proxy and managed by a Python orchestrator.
   SOCKS5 username/password auth, and local proxy auth are supported and must
   not be silently bypassed.
 - **State machine:** the proxy tracks `idle → waking → active`; the orchestrator
-  shuts down the Fargate task after `IDLE_TIMEOUT_MINUTES` of inactivity and
+  shuts down the Fargate task after `TASK_IDLE_TIMEOUT_MINUTES` of inactivity and
   restarts it on `POST /wake`.
 - **Documentation is a deliverable:** update `README.md` (and the relevant file
   in the File Guide) when behavior, config keys, or scripts change.

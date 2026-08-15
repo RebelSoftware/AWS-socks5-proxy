@@ -62,7 +62,7 @@ A two-tier proxy architecture: a local Node.js HTTP proxy + Python orchestrator 
 
 ```
 1. Browser sends last request → lastActivityAt timestamp set
-2. No traffic for IDLE_TIMEOUT_MINUTES → orchestrator detects idle
+2. No traffic for TASK_IDLE_TIMEOUT_MINUTES → orchestrator detects idle
 3. Orchestrator calls stop_task() → Fargate task stops
 4. proxy.js detects no endpoint → enters 'idle' state
 5. Next browser request hits proxy.js → returns 503 + triggers POST /wake
@@ -110,7 +110,7 @@ See [README.md](./README.md#costs).
   - Starts new Fargate tasks via `ecs.run_task()`
   - Monitors running tasks and extracts public IP from ENI attachments
   - Polls `http://http-proxy:8081/health` for `activeConnections` and `lastActivityAt`
-  - Shuts down remote task when idle for `IDLE_TIMEOUT_MINUTES`
+  - Shuts down remote task when idle for `TASK_IDLE_TIMEOUT_MINUTES`
   - Enters `idle_mode` after shutdown — does not restart the task
   - Receives `POST /wake` to start a new task on demand
   - `POST /stop` sets `explicit_stop` to prevent auto-wake
@@ -176,7 +176,7 @@ The orchestrator drives idle detection — no Lambda required:
 | **Orchestrator** (every 30s) | Polls proxy.js health — no connections + no activity for N minutes | Stops Fargate task, enters `idle_mode` |
 | **Proxy auto-wake** | Next browser request while idle | `POST /wake` → orchestrator starts new task |
 
-The idle timeout (`IDLE_TIMEOUT_MINUTES`) is configured in `.env`. Default is 60 minutes.
+The idle timeout (`TASK_IDLE_TIMEOUT_MINUTES`) is configured in `.env`. Default is 60 minutes.
 
 ---
 

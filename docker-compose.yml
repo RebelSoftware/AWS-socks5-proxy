@@ -56,7 +56,7 @@ services:
       - CLIENT_SECURITY_GROUP_ID=${CLIENT_SECURITY_GROUP_ID}
       - DUAL_IP_RETENTION_MINUTES=${DUAL_IP_RETENTION_MINUTES:-180}
       # Idle timeout — remote proxy shuts down after this many minutes of inactivity
-      - IDLE_TIMEOUT_MINUTES=${IDLE_TIMEOUT_MINUTES:-60}
+      - TASK_IDLE_TIMEOUT_MINUTES=${TASK_IDLE_TIMEOUT_MINUTES:-60}
       - HTTP_PROXY_HEALTH_URL=${HTTP_PROXY_HEALTH_URL:-http://http-proxy:8081/health}
     env_file:
       - .env

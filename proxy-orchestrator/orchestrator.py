@@ -50,8 +50,7 @@ CLIENT_SECURITY_GROUP_ID = os.getenv('CLIENT_SECURITY_GROUP_ID')  # Security gro
 DUAL_IP_RETENTION_MINUTES = int(os.getenv('DUAL_IP_RETENTION_MINUTES', '180'))
 
 # Idle timeout and wake configuration
-# Falls back to TASK_IDLE_TIMEOUT_MINUTES for backwards compatibility with setup.sh/.env
-IDLE_TIMEOUT_MINUTES = int(os.getenv('IDLE_TIMEOUT_MINUTES') or os.getenv('TASK_IDLE_TIMEOUT_MINUTES', '60'))
+TASK_IDLE_TIMEOUT_MINUTES = int(os.getenv('TASK_IDLE_TIMEOUT_MINUTES', '60'))
 HTTP_PROXY_HEALTH_URL = os.getenv('HTTP_PROXY_HEALTH_URL', 'http://http-proxy:8081/health')
 
 # Validation
@@ -74,7 +73,7 @@ logger.info(f"  IP_ALLOWLIST_ENABLED: {IP_ALLOWLIST_ENABLED}")
 if IP_ALLOWLIST_ENABLED:
     logger.info(f"  CLIENT_SECURITY_GROUP_ID: {CLIENT_SECURITY_GROUP_ID}")
     logger.info(f"  DUAL_IP_RETENTION_MINUTES: {DUAL_IP_RETENTION_MINUTES}")
-logger.info(f"  IDLE_TIMEOUT_MINUTES: {IDLE_TIMEOUT_MINUTES}")
+logger.info(f"  TASK_IDLE_TIMEOUT_MINUTES: {TASK_IDLE_TIMEOUT_MINUTES}")
 logger.info(f"  HTTP_PROXY_HEALTH_URL: {HTTP_PROXY_HEALTH_URL}")
 
 
@@ -603,9 +602,9 @@ class FargateProxyOrchestrator:
         idle_seconds = (time.time() * 1000 - last_activity_ts) / 1000
         idle_minutes = idle_seconds / 60
         
-        if idle_minutes >= IDLE_TIMEOUT_MINUTES and self.task_arn:
+        if idle_minutes >= TASK_IDLE_TIMEOUT_MINUTES and self.task_arn:
             logger.warning(
-                f"Proxy idle for {idle_minutes:.1f} minutes (timeout: {IDLE_TIMEOUT_MINUTES}m) — "
+                f"Proxy idle for {idle_minutes:.1f} minutes (timeout: {TASK_IDLE_TIMEOUT_MINUTES}m) — "
                 f"shutting down remote task"
             )
             if self.stop_task(self.task_arn):
@@ -637,7 +636,7 @@ def status():
             'socks5_port': SOCKS5_PORT,
             'idle_mode': orchestrator.idle_mode,
             'explicit_stop': orchestrator.explicit_stop,
-            'idle_timeout_minutes': IDLE_TIMEOUT_MINUTES,
+            'idle_timeout_minutes': TASK_IDLE_TIMEOUT_MINUTES,
             'timestamp': datetime.utcnow().isoformat()
         }
         
