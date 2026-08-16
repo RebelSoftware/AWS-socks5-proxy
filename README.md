@@ -78,7 +78,7 @@ This starts `http-proxy` and `proxy-orchestrator` locally but **does not** start
 task. The remote can be started later in a few ways:
 
 - Send traffic through `localhost:8080` — the proxy wakes the remote on demand.
-- `curl -X POST http://localhost:5000/start` — start the remote immediately.
+- `docker exec proxy-orchestrator curl -X POST http://localhost:5000/start` — start the remote immediately.
 - `./proxy-manage.sh start --remote` — recreate containers with auto-start enabled.
 
 `AUTO_START_REMOTE` in `.env` controls the default behavior of `./proxy-manage.sh start`
@@ -91,6 +91,42 @@ task. The remote can be started later in a few ways:
 > started unnecessarily. The value only changes to `true` if the container is recreated with
 > auto-start enabled (`./proxy-manage.sh start --remote` or `AUTO_START_REMOTE=true`). Run
 > `./proxy-manage.sh status` to see the baked-in value under "Remote auto-start".
+
+### Network exposure & security
+
+The HTTP proxy (port `8080`) is **bound to localhost only by default**
+(`PROXY_BIND_ADDRESS=127.0.0.1`). The orchestrator management API (port `5000`)
+is **not published on the host at all** — it is only reachable on the compose
+network and from inside the container (`docker exec proxy-orchestrator curl -s
+http://localhost:5000/status`). This is deliberate:
+
+- The HTTP proxy is an **open proxy** — anyone who can reach it can use it and,
+  while idle, any request **wakes the remote Fargate task** (cost!). On a host
+  reachable from the internet, port scanners and unknown probes hitting `8080`
+  have caused overnight task churn (many task starts with zero legit traffic).
+- The orchestrator API (`/start`, `/wake`, `/stop`, `/status`) is
+  **unauthenticated** and lets anyone start/stop tasks — never expose it.
+
+To allow other devices on your LAN to use the proxy, opt in explicitly:
+
+```bash
+# .env
+PROXY_BIND_ADDRESS=0.0.0.0        # expose HTTP proxy on the LAN
+```
+
+Recommendations:
+
+- Keep the orchestrator API unpublished (only add a `ports:` mapping for `5000`
+  if you truly need host access — and keep it localhost-bound).
+- Enable **local proxy auth** (`LOCAL_REQUIRE_AUTH=true` + `LOCAL_PROXY_USER` /
+  `LOCAL_PROXY_PASSWORD`): auth is checked before the wake path, so
+  unauthorized probes get `407` and cannot wake the remote task.
+- If you must expose `8080`, restrict it with a firewall to trusted
+  devices/addresses.
+- Keep `TASK_IDLE_TIMEOUT_MINUTES` reasonable (e.g. `60`); a very short timeout
+  (like `5`) makes each probe spawn a brand-new Fargate task instead of
+  reusing the running one.
+- If the host is internet-reachable, assume `8080`/`1080` will be scanned.
 
 ---
 

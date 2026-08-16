@@ -130,7 +130,7 @@ docker compose up -d --build
 
 ```bash
 docker compose ps
-curl http://localhost:5000/status
+docker exec proxy-orchestrator curl -s http://localhost:5000/status
 ```
 
 Wait ~30-60s for the Fargate task to initialize. The `/status` endpoint will show the remote IP once ready.
@@ -154,7 +154,7 @@ aws sts get-caller-identity
 ### Local Proxy Running but No Remote IP
 
 ```bash
-curl http://localhost:5000/status
+docker exec proxy-orchestrator curl -s http://localhost:5000/status
 aws ecs list-tasks --cluster proxy-cluster --desired-status RUNNING
 
 # Check Fargate logs
@@ -313,7 +313,7 @@ aws cloudwatch put-metric-alarm \
 |------|---------|
 | Start | `docker-compose up -d` |
 | Stop | `docker-compose down` |
-| Status | `curl http://localhost:5000/status` |
+| Status | `docker exec proxy-orchestrator curl -s http://localhost:5000/status` |
 | Logs | `docker-compose logs -f` |
 | Fargate logs | `aws logs tail /ecs/proxy-socks5-proxy --follow` |
 | List tasks | `aws ecs list-tasks --cluster $CLUSTER_NAME` |

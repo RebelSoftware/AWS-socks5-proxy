@@ -737,6 +737,13 @@ TASK_IDLE_TIMEOUT_MINUTES=$TASK_IDLE_TIMEOUT_MINUTES
 # NOTE: ./proxy-manage.sh start --no-remote always forces it off for a run.
 AUTO_START_REMOTE=${AUTO_START_REMOTE:-false}
 
+# Host binding — locked to localhost by default for safety. Set
+# PROXY_BIND_ADDRESS=0.0.0.0 ONLY to expose the proxy on the LAN (e.g. other
+# devices); this also exposes it to port scanners / anyone who can reach the
+# host and lets them wake the remote task. The orchestrator API (5000) is not
+# published at all; query it via `docker exec proxy-orchestrator curl ...`.
+PROXY_BIND_ADDRESS=${PROXY_BIND_ADDRESS:-127.0.0.1}
+
 # Proxy authentication configuration
 REQUIRE_AUTH=${REQUIRE_AUTH:-false}
 PROXY_USER=${PROXY_USER:-}

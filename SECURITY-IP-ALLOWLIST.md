@@ -38,8 +38,8 @@ HTTP `Proxy-Authorization: Basic` header required to use the local proxy at all.
 ### Check Current IP Status
 
 ```bash
-# View orchestrator status with IP information
-curl http://localhost:5000/status | jq '.'
+# View orchestrator status with IP information (API is not published on the host)
+docker exec proxy-orchestrator curl -s http://localhost:5000/status | jq '.'
 
 # Example output:
 # {
@@ -55,7 +55,7 @@ curl http://localhost:5000/status | jq '.'
 ### Check IP Allowlist Details
 
 ```bash
-curl http://localhost:5000/ip/status | jq '.'
+docker exec proxy-orchestrator curl -s http://localhost:5000/ip/status | jq '.'
 
 # Example output:
 # {
@@ -71,7 +71,7 @@ curl http://localhost:5000/ip/status | jq '.'
 If your IP changes and the automatic detection doesn't pick it up:
 
 ```bash
-curl -X POST http://localhost:5000/ip/check | jq '.'
+docker exec proxy-orchestrator curl -s -X POST http://localhost:5000/ip/check | jq '.'
 
 # This will:
 # 1. Detect your new current public IP
@@ -155,7 +155,7 @@ Inbound Rules:
 
 2. Manually trigger IP check:
    ```bash
-   curl -X POST http://localhost:5000/ip/check
+   docker exec proxy-orchestrator curl -s -X POST http://localhost:5000/ip/check
    ```
 
 3. Check orchestrator can reach IP detection services:
@@ -274,7 +274,7 @@ docker logs socks5-orchestrator | grep -E "(IP|security|allowlist)"
 ## Next Steps
 
 1. ✅ Deploy stack with IP allowlist enabled
-2. ✅ Verify IP appears in `curl http://localhost:5000/ip/status`
+2. ✅ Verify IP appears in `docker exec proxy-orchestrator curl -s http://localhost:5000/ip/status`
 3. ✅ Test proxy connection works with your IP
 4. ✅ Change office IP/network and verify automatic update
 5. ✅ Check logs for IP change notifications

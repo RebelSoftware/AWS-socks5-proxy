@@ -9,6 +9,17 @@
 set -e
 
 ORCHESTRATOR_URL="${1:-http://localhost:5000}"
+
+# The orchestrator API is not published on the host by default. Reach it from
+# inside the container via docker exec (the image ships curl); an explicit URL
+# argument still works for setups that publish the API.
+orch_curl() {
+    if [ "$ORCHESTRATOR_URL" = "http://localhost:5000" ]; then
+        docker exec proxy-orchestrator curl -s "$@"
+    else
+        curl -s "$@"
+    fi
+}
 STACK_NAME="proxy-fargate-proxy"
 REGION="${AWS_REGION:-us-east-1}"
 
@@ -31,7 +42,7 @@ echo ""
 
 # Get initial status
 info "Checking initial IP allowlist status..."
-STATUS=$(curl -s "$ORCHESTRATOR_URL/ip/status" 2>/dev/null || echo '{"ip_allowlist_enabled": false}')
+STATUS=$(orch_curl -s "$ORCHESTRATOR_URL/ip/status" 2>/dev/null || echo '{"ip_allowlist_enabled": false}')
 
 if [ "$(echo "$STATUS" | jq -r '.ip_allowlist_enabled // false')" != "true" ]; then
     fail "IP allowlist is not enabled. Run setup.sh with IP allowlist enabled first."
@@ -76,7 +87,7 @@ info "━━━━━━━━━━━━━━━━━━━━━━━━�
 info "TEST 1: Simulate IP change to 203.0.113.1"
 info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-RESULT=$(curl -s -X POST "$ORCHESTRATOR_URL/ip/simulate-change" \
+RESULT=$(orch_curl -s -X POST "$ORCHESTRATOR_URL/ip/simulate-change" \
     -H 'Content-Type: application/json' \
     -d '{"new_ip": "203.0.113.1"}')
 
@@ -99,7 +110,7 @@ info "━━━━━━━━━━━━━━━━━━━━━━━━�
 info "TEST 2: Change again to 203.0.113.2 (dual-IP)"
 info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-RESULT2=$(curl -s -X POST "$ORCHESTRATOR_URL/ip/simulate-change" \
+RESULT2=$(orch_curl -s -X POST "$ORCHESTRATOR_URL/ip/simulate-change" \
     -H 'Content-Type: application/json' \
     -d '{"new_ip": "203.0.113.2"}')
 
@@ -146,7 +157,7 @@ info "━━━━━━━━━━━━━━━━━━━━━━━━�
 info "TEST 3: Force cleanup of old IP (retention expiry)"
 info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-RESULT3=$(curl -s -X POST "$ORCHESTRATOR_URL/ip/simulate-change" \
+RESULT3=$(orch_curl -s -X POST "$ORCHESTRATOR_URL/ip/simulate-change" \
     -H 'Content-Type: application/json' \
     -d '{"new_ip": "203.0.113.3", "force_cleanup": true}')
 
@@ -180,7 +191,7 @@ info "TEST 4: Restore original IP"
 info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "$INITIAL_IP" != "unknown" ] && [ "$INITIAL_IP" != "null" ]; then
-    RESULT4=$(curl -s -X POST "$ORCHESTRATOR_URL/ip/simulate-change" \
+    RESULT4=$(orch_curl -s -X POST "$ORCHESTRATOR_URL/ip/simulate-change" \
         -H 'Content-Type: application/json' \
         -d "{\"new_ip\": \"$INITIAL_IP\", \"force_cleanup\": true}")
     

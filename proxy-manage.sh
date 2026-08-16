@@ -45,6 +45,18 @@ container_is_up() {
     [ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" = "running" ]
 }
 
+# Query the orchestrator management API. The API (port 5000) is NOT published on
+# the host — it's only reachable on the compose network / from inside the
+# container — so query it via docker exec (the image ships curl for its health
+# check).
+orchestrator_api() {
+    local method="${1:-GET}"
+    local path="${2:-/status}"
+    if container_is_up proxy-orchestrator; then
+        docker exec proxy-orchestrator curl -s --max-time 5 -X "$method" "http://localhost:5000${path}" 2>/dev/null
+    fi
+}
+
 start_proxy() {
     print_header "Starting Proxy"
     
@@ -92,7 +104,7 @@ start_proxy() {
         echo ""
         echo -e "${GREEN}Start the remote later when needed:${NC}"
         echo "  ./proxy-manage.sh start --remote         # recreate containers, start remote"
-        echo "  curl -X POST http://localhost:5000/start # start remote now, no container recreation"
+        echo "  docker exec proxy-orchestrator curl -X POST http://localhost:5000/start   # start remote now, no container recreation"
         echo ""
         echo -e "${BLUE}Note:${NC} traffic sent through localhost:8080 will wake the remote on demand."
         return 0
@@ -102,7 +114,7 @@ start_proxy() {
     print_info "Waiting for Fargate task to initialize (this may take 30-60 seconds)..."
     
     for i in {1..60}; do
-        STATUS=$(curl -s http://localhost:5000/status 2>/dev/null || echo "{}")
+        STATUS=$(orchestrator_api GET /status || echo "{}")
         REMOTE_IP=$(echo $STATUS | jq -r '.remote_ip // empty' 2>/dev/null)
         
         if [ ! -z "$REMOTE_IP" ] && [ "$REMOTE_IP" != "null" ] && [ "$REMOTE_IP" != "None" ]; then
@@ -246,7 +258,7 @@ show_status() {
     print_success "Fargate task: running"
     
     # Get remote IP
-    ORCHESTRATOR_STATUS=$(curl -s http://localhost:5000/status 2>/dev/null || echo "{}")
+    ORCHESTRATOR_STATUS=$(orchestrator_api GET /status || echo "{}")
     REMOTE_IP=$(echo $ORCHESTRATOR_STATUS | jq -r '.remote_ip // "unknown"' 2>/dev/null)
     
     # Idle/activity info from the http-proxy container
@@ -374,7 +386,7 @@ check_health() {
     fi
     
     # Test orchestrator API
-    if curl -s --max-time 5 http://localhost:5000/status >/dev/null 2>&1; then
+    if orchestrator_api GET /status >/dev/null 2>&1; then
         print_success "Orchestrator: responding"
     else
         print_error "Orchestrator: not responding"

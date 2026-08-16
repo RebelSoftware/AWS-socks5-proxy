@@ -40,7 +40,7 @@ Wait ~30-60 seconds for Fargate to initialize. Output will show:
 Remote auto-start is **off by default** (`AUTO_START_REMOTE=false`), so a plain
 `./proxy-manage.sh start` also keeps the remote off. Use `./proxy-manage.sh start --remote`
 to auto-start it. The remote will start on demand when traffic hits `localhost:8080`, or run
-`curl -X POST http://localhost:5000/start` to start it manually.
+`docker exec proxy-orchestrator curl -X POST http://localhost:5000/start` to start it manually.
 
 ### Step 3: Configure Browser
 
@@ -76,6 +76,13 @@ Should show an IP from your chosen AWS region!
 ```
 
 The remote proxy **auto-shuts down** after the configured idle timeout and **auto-wakes** on the next request. See [README.md](./README.md#idle-flow) for details.
+
+> **Security:** the proxy is bound to **localhost by default** (`PROXY_BIND_ADDRESS`
+> in `.env`), and the orchestrator API (5000) is **not published** on the host.
+> If your host is reachable from the internet or LAN, do **not** set
+> `PROXY_BIND_ADDRESS=0.0.0.0` unless you actually need LAN devices — an open proxy
+> on `8080` gets hit by port scanners, which wakes the remote Fargate task and
+> costs money. See [README.md](./README.md#network-exposure--security).
 
 ## Cleanup
 

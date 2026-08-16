@@ -38,6 +38,12 @@ local Node.js HTTP proxy and managed by a Python orchestrator.
   `start --remote` forces it on and `start --no-remote` forces it off for a
   single run. The remote is always startable on demand via `POST /start` or
   wake-on-demand from `http-proxy`.
+- **Network exposure:** the proxy (8080) binds to localhost by default
+  (`PROXY_BIND_ADDRESS`). The orchestrator API (5000) is NOT published on the
+  host — reach it via `docker exec proxy-orchestrator curl ...`. Exposing the
+  proxy on `0.0.0.0` is opt-in and discouraged: an internet-reachable open
+  proxy is hit by port scanners which wake the remote task (cost). Prefer
+  `LOCAL_REQUIRE_AUTH` + firewall if it must be exposed.
 - **Documentation is a deliverable:** update `README.md` (and the relevant file
   in the File Guide) when behavior, config keys, or scripts change.
 - **Secrets:** never print or commit `.env` contents, AWS credentials, or proxy

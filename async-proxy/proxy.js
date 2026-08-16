@@ -167,7 +167,7 @@ class DynamicProxy {
         // Wake state machine — handle idle/waking before routing
         if (!this.currentEndpoint || this.wakeState !== 'active') {
             if (this.wakeState === 'idle') {
-                logger.info('Request received while idle, triggering wake...');
+                logger.info(`Request received while idle from ${clientReq.socket.remoteAddress || 'unknown'}, triggering wake...`);
                 this.triggerWake();
                 clientRes.writeHead(503, { 'Content-Type': 'text/plain', 'Retry-After': '5' });
                 clientRes.end('Proxy is waking up — retry in a few seconds');
@@ -318,7 +318,7 @@ class DynamicProxy {
         // Wake state machine — handle idle/waking before routing
         if (!this.currentEndpoint || this.wakeState !== 'active') {
             if (this.wakeState === 'idle') {
-                logger.info('CONNECT request received while idle, triggering wake...');
+                logger.info(`CONNECT request received while idle from ${clientSocket.remoteAddress || 'unknown'}, triggering wake...`);
                 this.triggerWake();
                 clientSocket.write('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n');
                 clientSocket.end();

@@ -4,8 +4,13 @@ services:
     build: ./async-proxy
     container_name: http-proxy
     restart: unless-stopped
+    # Host-side bind: localhost-only by default for safety. The container still
+    # listens on 0.0.0.0:8080 internally; only the host publish port is bound.
+    # To expose on the LAN (other devices), set PROXY_BIND_ADDRESS=0.0.0.0 in
+    # .env — WARNING: this makes it an open proxy reachable by port scanners /
+    # anyone who can reach the host, and any request wakes the remote task.
     ports:
-      - "${LOCAL_PROXY_PORT:-8080}:${LOCAL_PROXY_PORT:-8080}"  # HTTP proxy port
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:${LOCAL_PROXY_PORT:-8080}:${LOCAL_PROXY_PORT:-8080}"  # HTTP proxy port
     environment:
       - LISTEN_HOST=0.0.0.0
       - LISTEN_PORT=${LOCAL_PROXY_PORT:-8080}
@@ -41,8 +46,13 @@ services:
       dockerfile: Dockerfile
     container_name: proxy-orchestrator
     restart: unless-stopped
-    ports:
-      - "${ORCHESTRATOR_PORT:-5000}:${ORCHESTRATOR_PORT:-5000}"  # Management API
+    # Management API (5000) is intentionally NOT published on the host. It is
+    # only reachable via the compose network (http-proxy) and from inside the
+    # container (Docker healthcheck, proxy-manage.sh / test-ip-allowlist.sh via
+    # `docker exec`). The API is unauthenticated (/start, /wake, /stop, /status)
+    # so it must not be exposed. To publish it anyway (not recommended):
+    # ports:
+    #   - "${ORCHESTRATOR_BIND_ADDRESS:-127.0.0.1}:${ORCHESTRATOR_PORT:-5000}:${ORCHESTRATOR_PORT:-5000}"
     environment:
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - ECS_CLUSTER=${ECS_CLUSTER:-proxy-cluster}
