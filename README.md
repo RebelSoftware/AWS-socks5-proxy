@@ -99,6 +99,8 @@ shows the active value).
   use `http://<your-lan-ip>:8080`. If LAN devices have different public IPs,
   the IP allowlist may block them — disable it and rely on local + SOCKS5 auth
   instead.
+- **Firewall caveat:** Docker-published ports bypass normal UFW rules — see
+  [HARDENING.md](./HARDENING.md) before relying on a host firewall.
 
 ---
 
@@ -178,6 +180,7 @@ wakes on the next request.
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | Manual deployment & troubleshooting |
 | [fargate-proxy-architecture.md](./fargate-proxy-architecture.md) | Architecture deep dive |
 | [SECURITY-IP-ALLOWLIST.md](./SECURITY-IP-ALLOWLIST.md) | IP allowlist & auth details |
+| [HARDENING.md](./HARDENING.md) | Docker/UFW firewall guide — read before relying on a host firewall |
 | [ec2-proxy-setup.md](./ec2-proxy-setup.md) | **Legacy** EC2-based alternative |
 | `setup.sh` / `proxy-manage.sh` | Automated deployment / management CLI |
 | `fargate-infrastructure.yaml` | CloudFormation template (incl. reaper Lambda) |

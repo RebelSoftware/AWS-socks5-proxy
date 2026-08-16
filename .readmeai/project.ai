@@ -196,6 +196,12 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
   fargate-proxy-architecture.md updated for the reaper. Docs: 1878 → 1548
   lines (excluding the untouched legacy ec2 guide). Cross-document anchors
   verified programmatically.
+- HARDENING.md added (2026-08-16): documents the Docker/UFW trap (published
+  ports are governed by FORWARD, not INPUT; Docker's own ACCEPTs outrun UFW
+  route rules), the DOCKER-USER chain fix with the conntrack ESTABLISHED
+  requirement, systemd-drop-in persistence, this project's loopback-default
+  posture, and verification habits. Linked from README's File Guide and
+  Network exposure section.
 
 ## Pending tasks
 
