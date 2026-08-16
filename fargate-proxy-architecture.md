@@ -53,8 +53,8 @@ A two-tier proxy architecture: a local Node.js HTTP proxy + Python orchestrator 
     │  │  PROXY_USER / PROXY_PASSWORD     │   │
     │  │  REQUIRE_AUTH                    │   │
     │  └──────────────────────────────────┘   │
-    │  Auto-stops after idle timeout          │
-    │  CloudWatch Logs for activity tracking  │
+    │  Stopped by orchestrator on idle        │
+    │  Force-stopped by reaper if abandoned   │
     └──────────────────────────────────────────┘
 ```
 
@@ -127,7 +127,10 @@ See [README.md](./README.md#costs).
 - **Logging:** CloudWatch Logs (streamed to `/ecs/proxy-go-socks5-proxy`)
 
 ### 4. Infrastructure (`fargate-infrastructure.yaml`)
-- CloudFormation template deploying: VPC, subnets, IGW, security groups, ECS cluster, task definition, log group, auto-shutdown Lambda + schedule
+- CloudFormation template deploying: VPC, subnets, IGW, security groups, ECS
+  cluster, task definition, log group, and the **reaper Lambda + 15-minute
+  schedule** (force-stops tasks older than `ReaperTimeoutMinutes` — a cost
+  guard for local-machine failure, not activity-based shutdown)
 
 ---
 
@@ -167,16 +170,18 @@ See [README.md](./README.md#costs).
 7. Browser receives response
 ```
 
-## Idle Shutdown
+## Shutdown Layers
 
-The orchestrator drives idle detection — no Lambda required:
+Two independent mechanisms keep costs low:
 
 | Mechanism | Trigger | Action |
 |-----------|---------|--------|
-| **Orchestrator** (every 30s) | Polls proxy.js health — no connections + no activity for N minutes | Stops Fargate task, enters `idle_mode` |
-| **Proxy auto-wake** | Next browser request while idle | `POST /wake` → orchestrator starts new task |
+| **Orchestrator** (every 30s) | proxy.js reports no connections and no activity for `TASK_IDLE_TIMEOUT_MINUTES` | Stops the Fargate task, enters `idle_mode` |
+| **Proxy auto-wake** | Next browser request while idle | `POST /wake` → orchestrator starts a new task |
+| **Reaper Lambda** (every 15 min) | Task older than `ReaperTimeoutMinutes` (default 120) | Force-stops it — local-machine failure guard only |
 
-The idle timeout (`TASK_IDLE_TIMEOUT_MINUTES`) is configured in `.env`. Default is 60 minutes.
+Idle detection is activity-based (orchestrator); the reaper deliberately uses
+task age because no traffic can flow without the local proxy.
 
 ---
 

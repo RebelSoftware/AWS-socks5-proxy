@@ -1,88 +1,89 @@
 # Deployment Guide — Fargate SOCKS5 Proxy
 
-> Manual deployment steps for those who prefer not to use `./setup.sh`. For automated setup, see [README.md](./README.md#quick-start).
+> Manual deployment for those who prefer not to use `./setup.sh` — the automated
+> script is the recommended path (see [QUICKSTART.md](./QUICKSTART.md)).
 
 ## Table of Contents
 1. [Prerequisites](#prerequisites)
-2. [AWS Infrastructure Setup](#aws-infrastructure-setup)
-3. [Local Proxy Setup](#local-proxy-setup)
-4. [Troubleshooting](#troubleshooting)
+2. [Deploy the AWS infrastructure](#1-deploy-the-aws-infrastructure)
+3. [Create the .env file](#2-create-the-env-file)
+4. [Build & run locally](#3-build--run-locally)
+5. [Troubleshooting](#troubleshooting)
+6. [Cleanup](#cleanup)
 
 ---
 
 ## Prerequisites
 
-- AWS account with Fargate permissions
+- AWS account with permissions for CloudFormation, ECS, EC2, and IAM
+  (`setup.sh` verifies these for you; manually you need stack management plus
+  IAM user/access-key management to create the orchestrator's restricted
+  credentials)
 - AWS CLI v2 configured
 - Docker and Docker Compose installed
-
-### Verify Setup
+- `jq` (used to parse stack outputs)
 
 ```bash
 aws sts get-caller-identity
-docker --version
-docker compose --version
+docker compose version
+jq --version
 ```
 
 ---
 
-## AWS Infrastructure Setup
-
-### Step 1: Deploy CloudFormation Stack
-
-Creates VPC, ECS cluster, security groups, and auto-shutdown Lambda.
-
-**With IP allowlist enabled (recommended for static IPs):**
+## 1. Deploy the AWS infrastructure
 
 ```bash
-ENVIRONMENT_NAME="proxy"
-TASK_IDLE_TIMEOUT_MINUTES=60
+STACK_NAME="proxy-fargate-proxy"
 YOUR_PUBLIC_IP=$(curl -s https://checkip.amazonaws.com)
 
 aws cloudformation create-stack \
-  --stack-name ${ENVIRONMENT_NAME}-fargate-proxy \
+  --stack-name $STACK_NAME \
   --template-body file://fargate-infrastructure.yaml \
   --parameters \
-    ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME} \
-    ParameterKey=TaskIdleTimeoutMinutes,ParameterValue=${TASK_IDLE_TIMEOUT_MINUTES} \
+    ParameterKey=EnvironmentName,ParameterValue=proxy \
+    ParameterKey=ReaperTimeoutMinutes,ParameterValue=120 \
     ParameterKey=IPAllowlistEnabled,ParameterValue=true \
     ParameterKey=ClientPublicIP,ParameterValue="${YOUR_PUBLIC_IP}/32" \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 
-**With SOCKS5 username/password (no IP allowlist):**
+- **`ReaperTimeoutMinutes`** — force-stop any task older than N minutes
+  (default 120, `0` disables). Cost guard for the case where the local machine
+  dies while a task is running.
+- **No IP allowlist?** Pass `IPAllowlistEnabled=false` and add
+  `ProxyUsername` / `ProxyPassword` — SOCKS5 auth then secures the proxy.
 
 ```bash
-aws cloudformation create-stack \
-  --stack-name ${ENVIRONMENT_NAME}-fargate-proxy \
-  --template-body file://fargate-infrastructure.yaml \
-  --parameters \
-    ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME} \
-    ParameterKey=TaskIdleTimeoutMinutes,ParameterValue=${TASK_IDLE_TIMEOUT_MINUTES} \
-    ParameterKey=IPAllowlistEnabled,ParameterValue=false \
-    ParameterKey=ProxyUsername,ParameterValue=myuser \
-    ParameterKey=ProxyPassword,ParameterValue=mypassword \
-  --capabilities CAPABILITY_NAMED_IAM
+aws cloudformation wait stack-create-complete --stack-name $STACK_NAME
+aws cloudformation describe-stacks --stack-name $STACK_NAME --query 'Stacks[0].Outputs' --output table
 ```
 
-**Wait for stack creation:**
+Creates: VPC, subnets, internet gateway, security groups, ECS cluster, task
+definition, CloudWatch log group, and the reaper Lambda + 15-minute schedule.
+
+---
+
+## 2. Create the .env file
+
+Extract the stack outputs in one call:
 
 ```bash
-aws cloudformation wait stack-create-complete --stack-name ${ENVIRONMENT_NAME}-fargate-proxy
-aws cloudformation describe-stacks --stack-name ${ENVIRONMENT_NAME}-fargate-proxy --query 'Stacks[0].Outputs' --output table
+STACK_JSON=$(aws cloudformation describe-stacks --stack-name $STACK_NAME)
+CLUSTER_NAME=$(echo "$STACK_JSON" | jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="ClusterName") | .OutputValue')
+SUBNET_ID=$(echo "$STACK_JSON" | jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="SubnetId1") | .OutputValue')
+SG_ID=$(echo "$STACK_JSON" | jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="SecurityGroupId") | .OutputValue')
 ```
 
-### Step 2: Create .env Configuration
+Then create `.env` (complete reference: [.env.example](./.env.example)):
 
 ```bash
-STACK_NAME="proxy-fargate-proxy"
-
-CLUSTER_NAME=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`ClusterName`].OutputValue' --output text)
-SUBNET_ID=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`SubnetId1`].OutputValue' --output text)
-SG_ID=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`SecurityGroupId`].OutputValue' --output text)
-
-cat > .env << EOF
 AWS_REGION=us-east-1
+# Orchestrator credentials — use a restricted IAM user (see the policy in
+# setup.sh: ECS task management, EC2 describe, SG ingress, iam:PassRole).
+AWS_ACCESS_KEY_ID=<orchestrator access key>
+AWS_SECRET_ACCESS_KEY=<orchestrator secret>
+
 ECS_CLUSTER=$CLUSTER_NAME
 ECS_TASK_DEFINITION=go-socks5-proxy
 TASK_SUBNET=$SUBNET_ID
@@ -90,25 +91,29 @@ TASK_SECURITY_GROUP=$SG_ID
 LOCAL_PROXY_PORT=8080
 SOCKS5_PORT=1080
 TASK_IDLE_TIMEOUT_MINUTES=60
+HTTP_PROXY_HEALTH_URL=http://http-proxy:8081/health
 
-# IP Allowlist
-IP_ALLOWLIST_ENABLED=true
-CLIENT_SECURITY_GROUP_ID=${SG_ID}
-DUAL_IP_RETENTION_MINUTES=180
+# Remote auto-start and host binding
+AUTO_START_REMOTE=false
+PROXY_BIND_ADDRESS=127.0.0.1
 
-# SOCKS5 auth (upstream)
+# SOCKS5 auth to Fargate
 REQUIRE_AUTH=false
 PROXY_USER=
 PROXY_PASSWORD=
+
+# IP allowlist
+IP_ALLOWLIST_ENABLED=true
+CLIENT_SECURITY_GROUP_ID=$SG_ID
+DUAL_IP_RETENTION_MINUTES=180
 
 # Local proxy auth (optional, for LAN use)
 LOCAL_REQUIRE_AUTH=false
 LOCAL_PROXY_USER=
 LOCAL_PROXY_PASSWORD=
-EOF
 ```
 
-### Step 3: Verify Infrastructure
+Verify the resources:
 
 ```bash
 aws ecs describe-clusters --clusters $CLUSTER_NAME
@@ -118,192 +123,107 @@ aws ec2 describe-security-groups --group-ids $SG_ID
 
 ---
 
-## Local Proxy Setup
-
-### Step 4: Build and Run
+## 3. Build & run locally
 
 ```bash
 docker compose up -d --build
-```
-
-### Step 5: Verify
-
-```bash
 docker compose ps
 docker exec proxy-orchestrator curl -s http://localhost:5000/status
 ```
 
-Wait ~30-60s for the Fargate task to initialize. The `/status` endpoint will show the remote IP once ready.
-
-All configuration and management commands are documented in [README.md](./README.md).
+Wait 30–60 seconds for the Fargate task to get its public IP (`remote_ip` in
+`/status`). Daily management commands: [README.md](./README.md#daily-usage).
 
 ---
 
 ## Troubleshooting
 
-### Local Containers Won't Start
+### Local containers won't start
 
 ```bash
-docker compose logs proxy-orchestrator
-docker compose logs http-proxy
-
-# Verify AWS credentials
-aws sts get-caller-identity
+docker compose logs proxy-orchestrator http-proxy
+aws sts get-caller-identity        # credentials valid?
 ```
 
-### Local Proxy Running but No Remote IP
+### Local proxy up, no remote IP
 
 ```bash
 docker exec proxy-orchestrator curl -s http://localhost:5000/status
 aws ecs list-tasks --cluster proxy-cluster --desired-status RUNNING
-
-# Check Fargate logs
 aws logs tail /ecs/proxy-go-socks5-proxy --follow
 ```
 
-### Fargate Task Won't Start
+### Fargate task won't start
 
-Common causes:
-- Subnet lacks Internet Gateway / public route
-- Security group blocks egress or SOCKS5 port (1080)
-- Task definition image not available
-- Insufficient Fargate capacity in region
-
-Check CloudFormation stack events for failures:
+Common causes: subnet missing internet gateway/public route, security group
+blocks egress or port 1080, task definition image unavailable, insufficient
+capacity in region. Check stack events:
 
 ```bash
-aws cloudformation describe-stack-events --stack-name proxy-fargate-proxy --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`]'
+aws cloudformation describe-stack-events --stack-name proxy-fargate-proxy \
+  --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`]'
 ```
 
-### Manual Fargate Operations
+### Manual Fargate operations
 
 ```bash
-# Start task via AWS CLI
+# Start a task via AWS CLI
 aws ecs run-task \
   --cluster proxy-cluster \
   --task-definition go-socks5-proxy \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}"
 
-# Stop task via AWS CLI
+# Stop a task
 TASK_ARN=$(aws ecs list-tasks --cluster proxy-cluster --desired-status RUNNING --query 'taskArns[0]' --output text)
 aws ecs stop-task --cluster proxy-cluster --task $TASK_ARN --reason "Manual stop"
-```
-- IAM roles not properly configured
 
-**Check:**
-```bash
-aws ecs describe-tasks --cluster $CLUSTER_NAME --tasks TASK_ARN
-# Look for 'failures' or 'stoppedReason' in the output
+# Inspect failures / stoppedReason
+aws ecs describe-tasks --cluster proxy-cluster --tasks $TASK_ARN
 ```
 
-### Issue: SOCKS5 Connection Fails
+### SOCKS5 connection fails
 
 ```bash
-# Test connectivity from orchestrator container
-docker compose exec orchestrator nc -zv $REMOTE_IP 1080
-
-# Check security group allows inbound on 1080
-aws ec2 describe-security-groups --group-ids $SG_ID
-
-# If using auth, verify credentials match
-grep -E "PROXY_USER|PROXY_PASSWORD" .env
-```
-
-### Issue: Auth Errors
-
-```bash
-# Verify the Fargate task has the correct env vars
-TASK_ARN=$(aws ecs list-tasks --cluster $CLUSTER_NAME --query 'taskArns[0]' --output text)
-aws ecs describe-tasks --cluster $CLUSTER_NAME --tasks $TASK_ARN | jq '.tasks[0].overrides.containerOverrides[0].environment'
-
-# Check local .env matches
+# Security group allows your IP on 1080?
+aws ec2 describe-security-group-rules --filters Name=group-id,Values=$SG_ID
+# Credentials match?
 grep -E "REQUIRE_AUTH|PROXY_USER|PROXY_PASSWORD" .env
 ```
 
-### Issue: Auto-Shutdown Not Working
+### Reaper (abandoned-task guard)
+
+The reaper force-stops tasks older than `ReaperTimeoutMinutes`. It normally
+never fires first — the orchestrator stops idle tasks sooner. If a task is
+stopped unexpectedly, check the Lambda logs:
 
 ```bash
-# Check Lambda function was created
-aws lambda get-function --function-name proxy-socks5-autoshutdown
-
-# View Lambda logs
-aws logs tail /aws/lambda/proxy-socks5-autoshutdown --follow
-
-# Check EventBridge rule
-aws events list-rules --name-prefix proxy
+aws lambda get-function --function-name proxy-socks5-reaper
+aws logs tail /aws/lambda/proxy-socks5-reaper --follow
 ```
 
-### Issue: High Costs
+### High costs
 
 ```bash
-# Check if tasks are stuck running
-aws ecs list-tasks --cluster $CLUSTER_NAME --desired-status RUNNING
-
-# Manually stop them
-TASK_ARN=$(aws ecs list-tasks --cluster $CLUSTER_NAME --query 'taskArns[0]' --output text)
-aws ecs stop-task --cluster $CLUSTER_NAME --task $TASK_ARN --reason "Cost cleanup"
-
-# Or use the management script
-./proxy-manage.sh stop --remote
+aws ecs list-tasks --cluster proxy-cluster --desired-status RUNNING   # stuck tasks?
+./proxy-manage.sh stop --remote                                       # stop everything
 ```
 
 ---
 
 ## Cleanup
 
-### Remove Everything
-
 ```bash
-# Stop and remove local containers
-docker compose down -v
-
-# Delete Fargate tasks
-TASK_ARNS=$(aws ecs list-tasks --cluster $CLUSTER_NAME --query 'taskArns[]' --output text)
-for task in $TASK_ARNS; do
-  aws ecs stop-task --cluster $CLUSTER_NAME --task $task
-done
-
-# Wait for tasks to stop
-sleep 60
-
-# Delete CloudFormation stack (removes all AWS resources)
+docker compose down
+./proxy-manage.sh stop --remote          # stop any Fargate task immediately
 aws cloudformation delete-stack --stack-name proxy-fargate-proxy
-
-# Verify deletion
 aws cloudformation wait stack-delete-complete --stack-name proxy-fargate-proxy
 ```
 
----
-
-## Cost Monitoring
-
-### Estimate Monthly Cost
-
-```bash
-# Fargate task hours per month
-HOURS_PER_MONTH=100
-
-# Cost calculation
-echo "vCPU cost: \$0.04048 × 0.25 × $HOURS_PER_MONTH = \$$(python3 -c \"print(0.04048 * 0.25 * $HOURS_PER_MONTH)\")"
-echo "Memory cost: \$0.004445 × 0.5 × $HOURS_PER_MONTH = \$$(python3 -c \"print(0.004445 * 0.5 * $HOURS_PER_MONTH)\")"
-echo "Data transfer: ~\$0 (first 1GB free)"
-```
-
-### Set CloudWatch Alarm
-
-```bash
-aws cloudwatch put-metric-alarm \
-  --alarm-name fargate-proxy-costs \
-  --alarm-description "Alert if Fargate costs exceed \$5/month" \
-  --metric-name EstimatedCharges \
-  --namespace AWS/Billing \
-  --statistic Maximum \
-  --period 86400 \
-  --threshold 5 \
-  --comparison-operator GreaterThanThreshold \
-  --evaluation-periods 1
-```
+> Cost watch: `aws ecs list-tasks --cluster proxy-cluster --desired-status
+> RUNNING` shows stuck tasks; a CloudWatch alarm on
+> `AWS/Billing.EstimatedCharges` can alert you (see AWS docs). The reaper
+> normally makes this unnecessary.
 
 ---
 
@@ -311,11 +231,10 @@ aws cloudwatch put-metric-alarm \
 
 | Task | Command |
 |------|---------|
-| Start | `docker-compose up -d` |
-| Stop | `docker-compose down` |
+| Start / stop | `./proxy-manage.sh start` / `./proxy-manage.sh stop` |
 | Status | `docker exec proxy-orchestrator curl -s http://localhost:5000/status` |
-| Logs | `docker-compose logs -f` |
-| Fargate logs | `aws logs tail /ecs/proxy-socks5-proxy --follow` |
-| List tasks | `aws ecs list-tasks --cluster $CLUSTER_NAME` |
-| Stop task | `aws ecs stop-task --cluster $CLUSTER_NAME --task TASK_ARN` |
+| Local logs | `docker compose logs -f http-proxy proxy-orchestrator` |
+| Fargate logs | `aws logs tail /ecs/proxy-go-socks5-proxy --follow` |
+| List tasks | `aws ecs list-tasks --cluster proxy-cluster` |
+| Stop task | `aws ecs stop-task --cluster proxy-cluster --task TASK_ARN` |
 

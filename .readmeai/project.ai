@@ -184,6 +184,18 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
   container.
 - Deferred by request: `proxy.js` Agent-based rewrite (possible future
   refactor) and removal of the task-level `TaskRole` from the template.
+- Documentation restructure (2026-08-16): README slimmed to a single front
+  page (removed the duplicate bottom "Start Here" and the duplicated
+  "Local Network Proxy" section, folded LAN guidance into "Network exposure"),
+  DEPLOYMENT.md rewritten as a manual-only reference (fixed removed CFN
+  parameters, reaper naming, stale `orchestrator` service name, v1
+  `docker-compose` syntax), SECURITY-IP-ALLOWLIST.md condensed (dropped stale
+  CFN-parameter listing and filler, fixed stale container names),
+  QUICKSTART.md prompt list fixed (no local-auth prompt exists; reaper prompt
+  added; Step 2 now matches `AUTO_START_REMOTE=false` default), and
+  fargate-proxy-architecture.md updated for the reaper. Docs: 1878 → 1548
+  lines (excluding the untouched legacy ec2 guide). Cross-document anchors
+  verified programmatically.
 
 ## Pending tasks
 
@@ -192,5 +204,3 @@ Local Orchestrator (Python/Flask) — proxy-orchestrator/orchestrator.py
 - (Optional) Future refactor: replace `proxy.js`'s manual HTTP-over-SOCKS
   handling with a custom `http.Agent` (requires agent invalidation on
   endpoint change + full HTTP/HTTPS/CONNECT testing).
-- (Deferred docs pass) README/DEPLOYMENT/architecture docs still describe the
-  auto-shutdown Lambda; update them when documentation is revisited.

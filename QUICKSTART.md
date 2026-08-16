@@ -12,10 +12,10 @@ chmod +x setup.sh
 ```
 
 You'll be prompted for:
-- **IP allowlist** — Restrict proxy to your IP (recommended for static IPs)
+- **IP allowlist** — restrict the Fargate proxy to your public IP
 - **Username/password** — SOCKS5 auth (required if IP allowlist is off)
-- **Local proxy auth** — Optional password for the local HTTP proxy itself
-- **Idle timeout** — How long before auto-shutdown (default 60 min)
+- **Idle timeout** — auto-shutdown after N min idle (default 60)
+- **Reaper timeout** — force-stop for abandoned tasks (default 120 min, 0 disables)
 
 ### Step 2: Start the Proxy
 
@@ -24,23 +24,23 @@ chmod +x proxy-manage.sh
 ./proxy-manage.sh start
 ```
 
-Wait ~30-60 seconds for Fargate to initialize. Output will show:
+Starts the local containers. The remote Fargate task starts **on demand** the
+first time traffic hits `localhost:8080` (or run
+`docker exec proxy-orchestrator curl -X POST http://localhost:5000/start` to
+start it immediately). To see the whole chain come up now:
+
+```bash
+./proxy-manage.sh start --remote    # also starts the remote task; wait 30-60 s
+```
+
+Output then shows:
 ```
 ✓ Remote SOCKS5 proxy ready
 ✓ Public IP: 12.34.56.78
 ```
 
-**Don't need the remote right now?** Start the local service without the Fargate task
-(saves cost until you actually use it):
-
-```bash
-./proxy-manage.sh start --no-remote
-```
-
-Remote auto-start is **off by default** (`AUTO_START_REMOTE=false`), so a plain
-`./proxy-manage.sh start` also keeps the remote off. Use `./proxy-manage.sh start --remote`
-to auto-start it. The remote will start on demand when traffic hits `localhost:8080`, or run
-`docker exec proxy-orchestrator curl -X POST http://localhost:5000/start` to start it manually.
+Remote auto-start is **off by default** (`AUTO_START_REMOTE=false`); `--remote`
+/ `--no-remote` override it for a single run.
 
 ### Step 3: Configure Browser
 

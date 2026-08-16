@@ -1,203 +1,172 @@
 # AWS Fargate SOCKS5 Proxy
-### Ephemeral proxy infrastructure — pay only when you need it
 
-A production-ready, cost-effective solution for routing traffic through a different IP using AWS Fargate and SOCKS5. Ideal for geo-testing websites, avoiding geolocation restrictions, and privacy-focused browsing.
+**Ephemeral proxy infrastructure — pay only when you need it.**
 
-**Requirements:** AWS account, Docker locally. Not tested on Windows.
+A local HTTP proxy that tunnels traffic through a SOCKS5 proxy running on an AWS
+Fargate task with a public IP from your chosen region. The Fargate task runs
+**only while in use**: it shuts down after an idle timeout and wakes automatically
+on the next request.
 
-**Main point of difference:** requires almost no user input other than starting and stopping the service. Transparently handles remote proxy IP address changes when used with a tool like foxyproxy. When starting a new proxy service fargate will create a new public IP address. the choices are to update your foxyproxy config on every start, pay for a fixed IP address, or use this application which handles it in the background. It even handles local and remote IP changes midstream.
+**This is not a VPN.** Pair it with a per-site proxying tool (e.g. FoxyProxy) to
+route selected websites through the proxy.
 
-**This is not a VPN** Which is to say using a tool like foxyproxy you can create per website proxying rules.  
-
-**Key Stats:**
-- **Cost:** ~$1–3/month (100–200 hrs)
-- **Setup:** ~5 minutes (automated)
-- **Startup:** 30–60 seconds
-- **Idle shutdown:** Configurable — remote stops after inactivity, auto-wakes on next request
-- **Persistent connections:** WebSocket, SSE, HTTP/2
-- **Security:** IP allowlist and/or username/password authentication
+| | |
+|---|---|
+| **Cost** | ~$1–3/month (100–200 hrs of use) |
+| **Setup** | ~5 minutes (`setup.sh`) |
+| **Startup** | 30–60 seconds (Fargate wake) |
+| **Security** | IP allowlist, SOCKS5 auth, optional local proxy auth |
+| **Maintenance** | start/stop only — IP changes are handled automatically |
 
 ---
 
 ## Quick Start
 
 ```bash
-chmod +x setup.sh
-./setup.sh                          # Automated deployment (asks about security, timeout)
-./proxy-manage.sh start             # Start proxy
-curl -x http://localhost:8080 http://httpbin.org/ip  # Test it
+./setup.sh                            # deploy AWS infra + write .env (asks about security, idle timeout, reaper)
+./proxy-manage.sh start               # start local proxy (remote starts on first use)
+curl -x http://localhost:8080 http://httpbin.org/ip  # test
 ```
 
-See [QUICKSTART.md](./QUICKSTART.md) for step-by-step, or [DEPLOYMENT.md](./DEPLOYMENT.md) for manual control.
+[QUICKSTART.md](./QUICKSTART.md) has the step-by-step; [DEPLOYMENT.md](./DEPLOYMENT.md)
+covers manual deployment.
 
 ---
 
 ## Architecture
 
 ```
-Your Browser (localhost:8080)
-         ↓
-Local HTTP Proxy (Node.js) — async-proxy/proxy.js
-  ─ Monitors orchestrator for endpoint updates
-  ─ Tracks request activity (lastActivityAt) for idle detection
-  ─ State machine: idle → waking → active
-  ─ Triggers wake-up via POST /wake when idle traffic arrives
-  ─ Routes traffic via SOCKS5 to Fargate task
-         ↓
-Local Orchestrator (Python) — proxy-orchestrator/orchestrator.py
-  ─ Manages Fargate task lifecycle
-  ─ Polls proxy.js health endpoint for activity data
-  ─ Shuts down remote task after TASK_IDLE_TIMEOUT_MINUTES of inactivity
-  ─ Enters idle_mode — does not restart the task
-  ─ Receives POST /wake to start a new task on demand
-  ─ Detects IP changes, manages security groups
-  ─ Provides management API on port 5000
-         ↓
-AWS Fargate SOCKS5 Proxy (serjs/go-socks5-proxy)  ── OFF when idle
-  ─ Ephemeral task with public IP                    ── ON when in use
-  ─ Optional username/password auth
-  ─ Started on demand, stopped after idle timeout
-         ↓
-Internet (with your AWS region's IP)
+Browser / LAN device → localhost:8080
+   │ HTTP
+async-proxy/proxy.js (Node)          local HTTP proxy
+   │ polls /status · wakes on demand · state machine idle → waking → active
+   │ SOCKS5 (port 1080)
+proxy-orchestrator (Python/Flask)    task lifecycle, idle shutdown, SG updates
+   │ boto3 (ECS / EC2)
+AWS Fargate task (serjs/go-socks5-proxy)   public IP — OFF when idle
+   │
+Internet (your AWS region's IP)
 ```
 
-**Idle flow:** No traffic for `TASK_IDLE_TIMEOUT_MINUTES` → orchestrator stops the Fargate task → proxy.js detects no endpoint → enters `idle` state → next browser request triggers `POST /wake` → orchestrator starts a new task → proxy.js picks up the IP and resumes routing.
+### Idle flow
 
-Browser always connects to `localhost:8080` — no reconfiguration needed between sessions.
+No traffic for `TASK_IDLE_TIMEOUT_MINUTES` → the orchestrator stops the Fargate
+task → `proxy.js` notices the missing endpoint and enters `idle` → the next browser
+request triggers `POST /wake` → a new task starts (with a **new public IP**) →
+`proxy.js` picks up the new endpoint and resumes routing. The browser always uses
+`localhost:8080` — no reconfiguration needed.
 
-### Start without the remote task (`--no-remote`)
+### Reaper (cost guard)
 
-If you want the local proxy service running but don't need the remote SOCKS5 proxy right now
-(e.g. to avoid paying for a running Fargate task), start with:
+The orchestrator handles activity-based idle shutdown. As a belt-and-braces
+safety net, an AWS-side **reaper** Lambda force-stops any task older than
+`ReaperTimeoutMinutes` (default 120, `0` disables — prompted for by `setup.sh`).
+If this machine dies while a task is running, no traffic can flow without the
+local proxy, so an old task is certainly abandoned — the reaper stops it before
+it quietly runs up a bill.
 
-```bash
-./proxy-manage.sh start --no-remote
-```
+See [fargate-proxy-architecture.md](./fargate-proxy-architecture.md) for details.
 
-This starts `http-proxy` and `proxy-orchestrator` locally but **does not** start the Fargate
-task. The remote can be started later in a few ways:
+### Start without the remote task
 
-- Send traffic through `localhost:8080` — the proxy wakes the remote on demand.
-- `docker exec proxy-orchestrator curl -X POST http://localhost:5000/start` — start the remote immediately.
-- `./proxy-manage.sh start --remote` — recreate containers with auto-start enabled.
+`AUTO_START_REMOTE` (default `false`) controls whether `start` also launches the
+remote Fargate task. When off, the local containers start alone and the remote
+starts only on demand:
 
-`AUTO_START_REMOTE` in `.env` controls the default behavior of `./proxy-manage.sh start`
-(currently `false`). Set it to `true` to make `start` auto-start the remote again;
-`--remote` and `--no-remote` override it for a single run.
+- `./proxy-manage.sh start --no-remote` / `--remote` — force it off/on for one run
+- `docker exec proxy-orchestrator curl -X POST http://localhost:5000/start` — start it now
+- any traffic through `localhost:8080` wakes the remote automatically
 
-> **Survives restarts:** when `AUTO_START_REMOTE=false`, that value is baked into the
-> `proxy-orchestrator` container's environment at creation, so a host reboot or a
-> Docker auto-restart (`restart: unless-stopped`) keeps the remote **off** — the remote is not
-> started unnecessarily. The value only changes to `true` if the container is recreated with
-> auto-start enabled (`./proxy-manage.sh start --remote` or `AUTO_START_REMOTE=true`). Run
-> `./proxy-manage.sh status` to see the baked-in value under "Remote auto-start".
+The value is baked into the orchestrator container at creation and survives
+restarts/reboots — only container recreation changes it (`./proxy-manage.sh status`
+shows the active value).
 
 ### Network exposure & security
 
-The HTTP proxy (port `8080`) is **bound to localhost only by default**
-(`PROXY_BIND_ADDRESS=127.0.0.1`). The orchestrator management API (port `5000`)
-is **not published on the host at all** — it is only reachable on the compose
-network and from inside the container (`docker exec proxy-orchestrator curl -s
-http://localhost:5000/status`). This is deliberate:
-
-- The HTTP proxy is an **open proxy** — anyone who can reach it can use it and,
-  while idle, any request **wakes the remote Fargate task** (cost!). On a host
-  reachable from the internet, port scanners and unknown probes hitting `8080`
-  have caused overnight task churn (many task starts with zero legit traffic).
-- The orchestrator API (`/start`, `/wake`, `/stop`, `/status`) is
-  **unauthenticated** and lets anyone start/stop tasks — never expose it.
-
-To allow other devices on your LAN to use the proxy, opt in explicitly:
-
-```bash
-# .env
-PROXY_BIND_ADDRESS=0.0.0.0        # expose HTTP proxy on the LAN
-```
-
-Recommendations:
-
-- Keep the orchestrator API unpublished (only add a `ports:` mapping for `5000`
-  if you truly need host access — and keep it localhost-bound).
-- Enable **local proxy auth** (`LOCAL_REQUIRE_AUTH=true` + `LOCAL_PROXY_USER` /
-  `LOCAL_PROXY_PASSWORD`): auth is checked before the wake path, so
-  unauthorized probes get `407` and cannot wake the remote task.
-- If you must expose `8080`, restrict it with a firewall to trusted
-  devices/addresses.
-- Keep `TASK_IDLE_TIMEOUT_MINUTES` reasonable (e.g. `60`); a very short timeout
-  (like `5`) makes each probe spawn a brand-new Fargate task instead of
-  reusing the running one.
-- If the host is internet-reachable, assume `8080`/`1080` will be scanned.
+- The HTTP proxy is **localhost-only by default** (`PROXY_BIND_ADDRESS=127.0.0.1`);
+  set it to `0.0.0.0` only to share the proxy with LAN devices.
+- The orchestrator API (port 5000) is **not published on the host** — it is
+  unauthenticated and must stay internal (`docker exec proxy-orchestrator curl -s
+  http://localhost:5000/status`).
+- An exposed proxy is an **open proxy**: any request it receives can wake the
+  remote Fargate task (cost). If you expose `8080`, enable local proxy auth
+  (`LOCAL_REQUIRE_AUTH` — checked **before** the wake path, so unauthorized
+  probes get `407`) and/or restrict it with a firewall.
+- Keep `TASK_IDLE_TIMEOUT_MINUTES` reasonable (e.g. `60`); with a very short
+  timeout each stray probe spawns a brand-new task.
+- **LAN devices:** set `PROXY_BIND_ADDRESS=0.0.0.0`, open port 8080 in the
+  firewall (`sudo ufw allow 8080/tcp`), and enable `LOCAL_REQUIRE_AUTH`; devices
+  use `http://<your-lan-ip>:8080`. If LAN devices have different public IPs,
+  the IP allowlist may block them — disable it and rely on local + SOCKS5 auth
+  instead.
 
 ---
 
 ## Daily Usage
 
 ```bash
-./proxy-manage.sh start              # Start local proxy (remote per AUTO_START_REMOTE)
-./proxy-manage.sh start --no-remote  # Start local proxy only — do NOT auto-start remote
-./proxy-manage.sh start --remote     # Start local proxy + auto-start remote Fargate task
-./proxy-manage.sh stop               # Stop local proxy (Fargate auto-shuts down)
-./proxy-manage.sh stop --remote      # Stop local proxy + stop Fargate task immediately
-./proxy-manage.sh status             # Current status & IP
-./proxy-manage.sh health             # Connectivity test
-./proxy-manage.sh logs               # View logs
-./proxy-manage.sh info               # Cost/config summary
+./proxy-manage.sh start              # start local proxy (remote starts on demand)
+./proxy-manage.sh start --remote     # also start the remote Fargate task now
+./proxy-manage.sh stop               # stop local containers (remote idles out)
+./proxy-manage.sh stop --remote      # stop local + remote immediately
+./proxy-manage.sh status             # status, wake state, idle time, public IP
+./proxy-manage.sh health             # connectivity test
+./proxy-manage.sh logs               # logs (last 200 lines per container)
+./proxy-manage.sh info               # config + cost summary
 ```
 
-**Browser config:**
-- **On this machine:** proxy `localhost:8080`
-- **On other LAN devices:** proxy `proxyname.local:8080` (your machine's LAN IP)
-
-See [Local Network Proxy](#local-network-proxy) for multi-device setup.
+**Browser config:** `localhost:8080` on this machine, or
+`http://<your-lan-ip>:8080` on other devices (see
+[Network exposure](#network-exposure--security)).
 
 ---
 
 ## Security
 
-The proxy supports **two independent auth layers**, configured during `setup.sh`:
+Three independent layers, configured during `setup.sh`:
 
 | Layer | What it protects | How it works |
 |-------|-----------------|--------------|
-| **Local HTTP proxy auth** | Access to `localhost:8080` | HTTP `Proxy-Authorization` header (Basic auth). Blocks all requests without valid credentials. |
-| **IP Allowlist** | Access to the Fargate SOCKS5 port 1080 | AWS security group restricts to your IP only. Auto-detects IP changes. |
-| **SOCKS5 auth** | Upstream SOCKS5 connection | SOCKS5 username/password between proxy.js and the Fargate task. |
+| **Local HTTP proxy auth** | Access to `localhost:8080` | HTTP `Proxy-Authorization` Basic header (optional, recommended for LAN) |
+| **IP allowlist** | Fargate SOCKS5 port 1080 | AWS security group restricted to your public IP, auto-updated on IP change |
+| **SOCKS5 auth** | Upstream tunnel to Fargate | SOCKS5 username/password (RFC 1929) |
 
-- If IP allowlist is **enabled**: local proxy auth is optional (recommended for LAN deployments)
-- If IP allowlist is **disabled**: local proxy auth + SOCKS5 auth are **recommended** — `setup.sh` enforces SOCKS5 auth
-- **Local proxy auth** (`LOCAL_REQUIRE_AUTH`) is ideal for LAN/multi-device setups where untrusted devices share the network
-
+`setup.sh` enforces at least one AWS-facing layer (allowlist or SOCKS5 auth).
 See [SECURITY-IP-ALLOWLIST.md](./SECURITY-IP-ALLOWLIST.md) for details.
 
 ---
 
 ## Configuration
 
-All configuration is stored in `.env` (generated by `setup.sh`). Key values:
+All configuration is stored in `.env` (generated by `setup.sh`; reference:
+`.env.example`). Key values:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TASK_IDLE_TIMEOUT_MINUTES` | 60 | Remote proxy auto-shutdown after N min idle |
-| `IP_ALLOWLIST_ENABLED` | `false` | Restrict proxy to your public IP |
-| `REQUIRE_AUTH` | `false` | Require SOCKS5 username/password (upstream to Fargate) |
-| `PROXY_USER` | — | SOCKS5 username |
-| `PROXY_PASSWORD` | — | SOCKS5 password |
-| `LOCAL_REQUIRE_AUTH` | `false` | Require username/password on the local HTTP proxy itself |
-| `LOCAL_PROXY_USER` | — | Local HTTP proxy username |
-| `LOCAL_PROXY_PASSWORD` | — | Local HTTP proxy password |
-| `DUAL_IP_RETENTION_MINUTES` | 180 | Keep old IP in SG when IP changes |
+| `TASK_IDLE_TIMEOUT_MINUTES` | 60 | Remote auto-shutdown after N min idle (0 = never) |
+| `AUTO_START_REMOTE` | `false` | Whether `start` also starts the remote task |
+| `PROXY_BIND_ADDRESS` | `127.0.0.1` | Host bind address for the HTTP proxy |
+| `IP_ALLOWLIST_ENABLED` | `false` | Restrict Fargate port 1080 to your public IP |
+| `DUAL_IP_RETENTION_MINUTES` | 180 | Keep the old IP in the SG during transitions |
+| `REQUIRE_AUTH` / `PROXY_USER` / `PROXY_PASSWORD` | — | SOCKS5 auth to Fargate |
+| `LOCAL_REQUIRE_AUTH` / `LOCAL_PROXY_USER` / `LOCAL_PROXY_PASSWORD` | — | Auth for the local HTTP proxy |
+
+The reaper timeout is **not** an `.env` value — it is a CloudFormation parameter
+(`ReaperTimeoutMinutes`, default 120), prompted for by `setup.sh`.
 
 ---
 
 ## Costs
 
-| Usage | Monthly Cost |
+| Usage | Monthly cost |
 |-------|-------------|
 | 50 hrs | ~$0.60 |
 | 100 hrs | ~$1.20 |
 | 200 hrs | ~$2.40 |
 
-**Includes:** Fargate compute (vCPU+memory), 1 GB data transfer, auto-shutdown Lambda, CloudWatch logs.
-**Savings:** Ephemeral by design — no minimum, pay only when running, auto-shutdown after idle timeout (default 60 min). Automatically wakes on next browser request.
+Includes Fargate compute (0.25 vCPU / 0.5 GB), data transfer, the reaper Lambda,
+and CloudWatch logs. Ephemeral by design: no minimum, auto-shutdown after idle,
+wakes on the next request.
 
 ---
 
@@ -205,49 +174,38 @@ All configuration is stored in `.env` (generated by `setup.sh`). Key values:
 
 | File | Purpose |
 |------|---------|
-| [QUICKSTART.md](./QUICKSTART.md) | 5-min quick start |
-| [README.md](./README.md) | Full documentation reference (this file) |
-| [DEPLOYMENT.md](./DEPLOYMENT.md) | Step-by-step deployment & troubleshooting |
-| [fargate-proxy-architecture.md](./fargate-proxy-architecture.md) | Architecture deep-dive |
-| [SECURITY-IP-ALLOWLIST.md](./SECURITY-IP-ALLOWLIST.md) | IP allowlist & auth security details |
-| `setup.sh` | Automated deployment script |
-| `proxy-manage.sh` | CLI management (start/stop/status/logs/info) |
-| `fargate-infrastructure.yaml` | AWS CloudFormation template |
-| `docker-compose.yml` | Docker Compose config for local services |
-| `async-proxy/proxy.js` | Local Node.js HTTP → SOCKS5 proxy |
-| `proxy-orchestrator/orchestrator.py` | Python orchestrator managing Fargate lifecycle |
-| `proxy-orchestrator/entrypoint.sh` | Orchestrator container entrypoint |
-| `async-proxy/Dockerfile` | Dockerfile for the local HTTP proxy |
-| `proxy-orchestrator/Dockerfile` | Dockerfile for the orchestrator |
-
-**Legacy:** `ec2-proxy-setup.md` (EC2-based alternative, different approach)
+| [QUICKSTART.md](./QUICKSTART.md) | 5-minute quick start |
+| [DEPLOYMENT.md](./DEPLOYMENT.md) | Manual deployment & troubleshooting |
+| [fargate-proxy-architecture.md](./fargate-proxy-architecture.md) | Architecture deep dive |
+| [SECURITY-IP-ALLOWLIST.md](./SECURITY-IP-ALLOWLIST.md) | IP allowlist & auth details |
+| [ec2-proxy-setup.md](./ec2-proxy-setup.md) | **Legacy** EC2-based alternative |
+| `setup.sh` / `proxy-manage.sh` | Automated deployment / management CLI |
+| `fargate-infrastructure.yaml` | CloudFormation template (incl. reaper Lambda) |
+| `docker-compose.yml` | Local services |
+| `async-proxy/` · `proxy-orchestrator/` | Local proxy (Node) · orchestrator (Python) source |
 
 ---
 
 ## FAQ
 
-**Do I need to update browser settings each time?**  
-No — `localhost:8080` is permanent.
+**Do I need to update browser settings each time?**
+No — `localhost:8080` is permanent; IP changes are handled automatically.
 
-**Why is first startup slow?**  
-Fargate initializes in ~30–60 seconds.
+**Why is the first request after idle slow?**
+The Fargate task takes 30–60 seconds to start.
 
-**What if I forget to stop it?**  
-Ephemeral by design — auto-shutdown after the configured idle timeout (default 60 min). The orchestrator monitors request activity through the local HTTP proxy and stops the remote Fargate task when no traffic has been seen for the timeout period. The next browser request automatically wakes it up (30-60s delay for Fargate initialization).
+**What if I forget to stop it?**
+The remote shuts down after the idle timeout, and the reaper force-stops any
+abandoned task (default 120 min) even if the local machine dies.
 
-If you put your PC to sleep the local Docker containers stop — the remote proxy has already been shut down by the idle timeout at that point since no requests were flowing. If your local containers are still running (e.g. always-on device), the idle timeout still applies and the remote will shut down.
+**Can other devices on my network use it?**
+Yes — see [Network exposure](#network-exposure--security).
 
-**Can I use this for other devices on my network?**  
-Yes — the proxy already listens on all network interfaces. Point any device on your LAN to `http://[your-machine-ip]:8080`. Enable `LOCAL_REQUIRE_AUTH=true` (see [configuration](#configuration)) to prevent unauthorized access. See [Local Network Proxy](#local-network-proxy).
+**What IP/country will I get?**
+Whichever AWS region you deploy to.
 
-**How is security handled?**  
-Two complementary layers: IP allowlist (security group restriction) and/or SOCKS5 username/password authentication. Encrypted end-to-end.
-
-**What IP/country will I get?**  
-Depends on the AWS region you deploy to.
-
-**Can I customize the SOCKS5 proxy?**  
-Yes — see [serjs/go-socks5-proxy](https://github.com/serjs/socks5-server) for config options.
+**Can I customize the SOCKS5 proxy image?**
+Yes — see [serjs/socks5-server](https://github.com/serjs/socks5-server).
 
 ---
 
@@ -256,77 +214,11 @@ Yes — see [serjs/go-socks5-proxy](https://github.com/serjs/socks5-server) for 
 | Symptom | Check |
 |---------|-------|
 | Proxy won't start | `docker compose logs`, `aws sts get-caller-identity` |
-| Fargate task won't init | `aws ecs list-tasks --cluster proxy-cluster`, check CloudWatch logs & security groups |
+| Fargate task won't init | `aws ecs list-tasks --cluster proxy-cluster`, CloudWatch logs, SG rules |
 | Can't connect locally | `curl http://localhost:8080`, `docker compose ps` |
-| Can't connect from another device | `curl http://[your-lan-ip]:8080` from that device, check firewall isn't blocking port 8080 |
-| Auth errors | Verify `PROXY_USER`/`PROXY_PASSWORD` match between `.env` and Fargate task definition |
+| Can't connect from another device | `PROXY_BIND_ADDRESS=0.0.0.0` + firewall on 8080 |
+| Auth errors | `PROXY_USER`/`PROXY_PASSWORD` match between `.env` and the task definition |
+| Task left running (cost) | `./proxy-manage.sh stop --remote`; abandoned tasks are reaped automatically |
 
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed troubleshooting.
+See [DEPLOYMENT.md](./DEPLOYMENT.md#troubleshooting) for detailed steps.
 
----
-
-## Local Network Proxy
-
-The proxy already listens on all network interfaces (`0.0.0.0:8080`). Any device on your LAN can use it — no code changes needed.
-
-### Setup
-
-**1. Find your machine's LAN IP**
-
-```bash
-ip addr show | grep 'inet ' | grep -v 127.0.0.1
-# Example output: inet 192.168.1.100/24 → LAN IP is 192.168.1.100
-```
-
-**2. Configure devices**
-
-Point each device's HTTP/HTTPS proxy settings to `http://[your-lan-ip]:8080`. If you enabled local proxy auth (`LOCAL_REQUIRE_AUTH=true`), use `http://user:pass@[lan-ip]:8080`.
-
-**3. Open the firewall (if needed)**
-
-```bash
-# ufw
-sudo ufw allow 8080/tcp comment 'SOCKS5 proxy'
-
-# firewalld
-sudo firewall-cmd --permanent --add-port=8080/tcp && sudo firewall-cmd --reload
-```
-
-### Best Practices
-
-| Concern | Recommendation |
-|---------|----------------|
-| **Authentication** | Enable `LOCAL_REQUIRE_AUTH=true` in `.env` so not just anyone on the network can use the proxy |
-| **Persistence** | `restart: always` is already set in `docker-compose.yml` — containers restart on crash/reboot |
-| **Startup on boot** | Enable Docker to start on boot: `sudo systemctl enable docker` |
-| **IP allowlist** | If enabled, the orchestrator updates the security group for your machine's public IP — works through NAT. If devices have different public IPs, consider disabling IP allowlisting and relying on local proxy auth + SOCKS5 auth instead |
-| **Idle timeout** | The default 60-min timeout prevents the remote Fargate proxy from running 24/7 when nobody is using it. Without this, a shared household proxy would cost ~$8-9/month |
-
-### Architecture
-
-```
-Any Device on LAN (proxy → 192.168.1.100:8080)
-         ↓
-Local HTTP Proxy (this machine)
-         ↓
-Local Orchestrator (this machine)
-         ↓
-AWS Fargate SOCKS5 Proxy (auto-idle when not in use)
-         ↓
-Internet (with your AWS region's IP)
-```
-
----
-
-## Start Here
-
-```bash
-cat QUICKSTART.md          # Read quick start (5 min)
-chmod +x setup.sh          #
-./setup.sh                 # Run automated setup (5 min)
-chmod +x proxy-manage.sh  #
-./proxy-manage.sh start    # Start proxy
-curl -x http://localhost:8080 http://httpbin.org/ip   # Test
-```
-
-**You'll have a proxy running with an IP from your chosen AWS region in ~15 minutes total.**
