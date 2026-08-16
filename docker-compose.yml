@@ -61,7 +61,7 @@ services:
       # Auto-start remote Fargate task. Set false via `./proxy-manage.sh start --no-remote`
       # (or by adding AUTO_START_REMOTE=false to .env) to run the local proxy
       # without starting the remote SOCKS5 proxy automatically.
-      - AUTO_START_REMOTE=${AUTO_START_REMOTE:-true}
+      - AUTO_START_REMOTE=${AUTO_START_REMOTE:-false}
     env_file:
       - .env
     networks:

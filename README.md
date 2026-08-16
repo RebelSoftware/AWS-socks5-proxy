@@ -79,17 +79,17 @@ task. The remote can be started later in a few ways:
 
 - Send traffic through `localhost:8080` — the proxy wakes the remote on demand.
 - `curl -X POST http://localhost:5000/start` — start the remote immediately.
-- `./proxy-manage.sh start` — recreate containers with auto-start enabled.
+- `./proxy-manage.sh start --remote` — recreate containers with auto-start enabled.
 
-You can also set `AUTO_START_REMOTE=false` in `.env` to make it the default for direct
-`docker compose up` invocations. (`./proxy-manage.sh start` always defaults to auto-start;
-use the `--no-remote` flag to override it for a single run.)
+`AUTO_START_REMOTE` in `.env` controls the default behavior of `./proxy-manage.sh start`
+(currently `false`). Set it to `true` to make `start` auto-start the remote again;
+`--remote` and `--no-remote` override it for a single run.
 
-> **Survives restarts:** when you start with `--no-remote`, the `AUTO_START_REMOTE=false` value is
-> baked into the `proxy-orchestrator` container's environment at creation, so a host reboot or a
+> **Survives restarts:** when `AUTO_START_REMOTE=false`, that value is baked into the
+> `proxy-orchestrator` container's environment at creation, so a host reboot or a
 > Docker auto-restart (`restart: unless-stopped`) keeps the remote **off** — the remote is not
-> started unnecessarily. The value only reverts to `true` if the container is recreated by a plain
-> `./proxy-manage.sh start` (or `docker compose up -d`) without the flag. Run
+> started unnecessarily. The value only changes to `true` if the container is recreated with
+> auto-start enabled (`./proxy-manage.sh start --remote` or `AUTO_START_REMOTE=true`). Run
 > `./proxy-manage.sh status` to see the baked-in value under "Remote auto-start".
 
 ---
@@ -97,8 +97,9 @@ use the `--no-remote` flag to override it for a single run.)
 ## Daily Usage
 
 ```bash
-./proxy-manage.sh start              # Start (waits ~30–60s for Fargate init)
-./proxy-manage.sh start --no-remote  # Start local proxy only — do NOT auto-start remote Fargate task
+./proxy-manage.sh start              # Start local proxy (remote per AUTO_START_REMOTE)
+./proxy-manage.sh start --no-remote  # Start local proxy only — do NOT auto-start remote
+./proxy-manage.sh start --remote     # Start local proxy + auto-start remote Fargate task
 ./proxy-manage.sh stop               # Stop local proxy (Fargate auto-shuts down)
 ./proxy-manage.sh stop --remote      # Stop local proxy + stop Fargate task immediately
 ./proxy-manage.sh status             # Current status & IP

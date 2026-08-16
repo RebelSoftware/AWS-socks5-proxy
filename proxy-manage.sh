@@ -1,6 +1,6 @@
 #!/bin/bash
 # Management script for Fargate SOCKS5 proxy
-# Usage: ./proxy-manage.sh [start|start --no-remote|stop|stop --remote|status|logs|info]
+# Usage: ./proxy-manage.sh [start|start --remote|start --no-remote|stop|stop --remote|status|logs|info]
 
 set -e
 
@@ -48,19 +48,22 @@ container_is_up() {
 start_proxy() {
     print_header "Starting Proxy"
     
-    # Parse optional --no-remote flag
-    # When set, the local proxy starts WITHOUT auto-starting the remote Fargate
-    # SOCKS5 task (saves cost when the proxy is not needed immediately). The
-    # remote can still be started on demand later (POST /start, or traffic
-    # through the local proxy will trigger wake-on-demand).
-    AUTO_START_REMOTE=true
+    # Remote auto-start is controlled by AUTO_START_REMOTE (from .env, sourced
+    # above, or the compose default). It can be overridden per run:
+    #   --no-remote / -n  force OFF (local proxy only)
+    #   --remote    / -r  force ON  (start the remote Fargate task now)
     for arg in "$@"; do
         case "$arg" in
             --no-remote|-n)
                 AUTO_START_REMOTE=false
                 ;;
+            --remote|-r)
+                AUTO_START_REMOTE=true
+                ;;
         esac
     done
+    # If no flag was given, use the configured value (default off).
+    AUTO_START_REMOTE="${AUTO_START_REMOTE:-false}"
     
     if ! command -v docker &> /dev/null; then
         print_error "Docker not installed"
@@ -85,10 +88,10 @@ start_proxy() {
     
     # If remote auto-start is disabled, we're done — do not wait for Fargate
     if [ "$AUTO_START_REMOTE" = false ]; then
-        print_success "Remote SOCKS5 proxy NOT started (--no-remote)"
+        print_success "Remote SOCKS5 proxy NOT started (AUTO_START_REMOTE=false)"
         echo ""
         echo -e "${GREEN}Start the remote later when needed:${NC}"
-        echo "  ./proxy-manage.sh start                  # recreates containers, auto-starts remote"
+        echo "  ./proxy-manage.sh start --remote         # recreate containers, start remote"
         echo "  curl -X POST http://localhost:5000/start # start remote now, no container recreation"
         echo ""
         echo -e "${BLUE}Note:${NC} traffic sent through localhost:8080 will wake the remote on demand."
@@ -219,6 +222,14 @@ show_status() {
         return 1
     fi
     
+    # AUTO_START_REMOTE baked into the orchestrator container at creation — this
+    # is the value that survives container restarts (host reboot, crash, etc.).
+    ORCH_AUTO_START=$(docker inspect proxy-orchestrator \
+        --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+        | grep '^AUTO_START_REMOTE=' | cut -d= -f2 | tail -1)
+    ORCH_AUTO_START="${ORCH_AUTO_START:-true}"
+    echo "  Remote auto-start: $ORCH_AUTO_START   # survives container restarts"
+    
     # Check Fargate task
     TASKS=$(aws ecs list-tasks \
         --cluster $ECS_CLUSTER \
@@ -245,14 +256,6 @@ show_status() {
     ACTIVE_CONNS=$(echo "$PROXY_HEALTH" | jq -r '.activeConnections // 0' 2>/dev/null)
     IDLE_TIMEOUT_MINS=$(echo "$ORCHESTRATOR_STATUS" | jq -r '.idle_timeout_minutes // "unknown"' 2>/dev/null)
 
-    # AUTO_START_REMOTE baked into the orchestrator container at creation — this
-    # is the value that survives container restarts (host reboot, crash, etc.),
-    # so it shows whether the remote will auto-start after a restart.
-    ORCH_AUTO_START=$(docker inspect proxy-orchestrator \
-        --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
-        | grep '^AUTO_START_REMOTE=' | cut -d= -f2 | tail -1)
-    ORCH_AUTO_START="${ORCH_AUTO_START:-true}"
-
     if [[ "$IDLE_SECONDS" =~ ^[0-9]+$ ]]; then
         if [ "$IDLE_SECONDS" -ge 3600 ]; then
             IDLE_DISPLAY="$(awk "BEGIN {printf \"%.1f h\", $IDLE_SECONDS/3600}")"
@@ -274,7 +277,6 @@ show_status() {
     echo "  Idle for:        $IDLE_DISPLAY"
     echo "  Active conns:    $ACTIVE_CONNS"
     echo "  Idle timeout:    ${IDLE_TIMEOUT_MINS} min"
-    echo "  Remote auto-start: $ORCH_AUTO_START   # survives container restarts"
     echo ""
     echo -e "${BLUE}Quick Test:${NC}"
     echo "  curl -x http://localhost:8080 http://httpbin.org/ip"
@@ -421,8 +423,9 @@ case "${1:-status}" in
         echo "Usage: $0 [command]"
         echo ""
         echo "Commands:"
-        echo "  start    - Start local proxy and orchestrate Fargate task"
+        echo "  start    - Start local proxy (remote start per AUTO_START_REMOTE)"
         echo "  start --no-remote - Start local proxy WITHOUT auto-starting remote Fargate task"
+        echo "  start --remote - Start local proxy AND auto-start remote Fargate task"
         echo "  stop     - Stop local proxy (Fargate auto-shuts down after idle)"
         echo "  stop --remote - Stop local proxy AND remote Fargate task immediately"
         echo "  status   - Show proxy status and configuration"

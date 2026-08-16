@@ -37,7 +37,9 @@ Wait ~30-60 seconds for Fargate to initialize. Output will show:
 ./proxy-manage.sh start --no-remote
 ```
 
-The remote will start on demand when traffic hits `localhost:8080`, or run
+Remote auto-start is **off by default** (`AUTO_START_REMOTE=false`), so a plain
+`./proxy-manage.sh start` also keeps the remote off. Use `./proxy-manage.sh start --remote`
+to auto-start it. The remote will start on demand when traffic hits `localhost:8080`, or run
 `curl -X POST http://localhost:5000/start` to start it manually.
 
 ### Step 3: Configure Browser
@@ -62,8 +64,9 @@ Should show an IP from your chosen AWS region!
 ## Daily Usage
 
 ```bash
-./proxy-manage.sh start              # Start proxy
-./proxy-manage.sh start --no-remote  # Start local proxy without auto-starting remote Fargate task
+./proxy-manage.sh start              # Start proxy (remote per AUTO_START_REMOTE)
+./proxy-manage.sh start --no-remote  # Start local proxy without auto-starting remote
+./proxy-manage.sh start --remote     # Start local proxy + auto-start remote Fargate task
 ./proxy-manage.sh stop               # Stop local containers
 ./proxy-manage.sh stop --remote      # Stop local + Fargate immediately
 ./proxy-manage.sh status             # Show status
