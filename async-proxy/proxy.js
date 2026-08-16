@@ -229,46 +229,59 @@ class DynamicProxy {
                 clientReq.pipe(proxySocket, { end: false });
             }
 
-            // Parse the HTTP response from the tunnel and forward to client
-            let responseBuffer = Buffer.alloc(0);
+            // Parse the HTTP response from the tunnel and forward to client.
+            // Buffer is only grown while looking for the header terminator —
+            // once headers are parsed the body is streamed chunk-by-chunk so
+            // large downloads stay in constant memory (Buffer.concat on every
+            // chunk would be O(n²) and retain the whole body).
+            let responseBuffer = null;
             let headersParsed = false;
 
             proxySocket.on('data', (chunk) => {
-                responseBuffer = Buffer.concat([responseBuffer, chunk]);
-
                 if (!headersParsed) {
+                    responseBuffer = responseBuffer
+                        ? Buffer.concat([responseBuffer, chunk])
+                        : chunk;
+
                     // Look for the end of headers
                     const headerEnd = responseBuffer.indexOf('\r\n\r\n');
-                    if (headerEnd !== -1) {
-                        headersParsed = true;
+                    if (headerEnd === -1) return; // headers not complete yet
 
-                        // Parse status line
-                        const headerSection = responseBuffer.subarray(0, headerEnd).toString();
-                        const statusLine = headerSection.split('\r\n')[0];
-                        const statusCode = parseInt(statusLine.split(' ')[1], 10);
-                        const statusMessage = statusLine.split(' ').slice(2).join(' ');
+                    headersParsed = true;
 
-                        // Parse headers
-                        const headerLines = headerSection.split('\r\n').slice(1);
-                        const headers = {};
-                        for (const line of headerLines) {
-                            const sep = line.indexOf(':');
-                            if (sep !== -1) {
-                                const key = line.substring(0, sep).trim();
-                                const val = line.substring(sep + 1).trim();
-                                headers[key] = val;
-                            }
-                        }
+                    // Parse status line
+                    const headerSection = responseBuffer.subarray(0, headerEnd).toString();
+                    const statusLine = headerSection.split('\r\n')[0];
+                    const statusCode = parseInt(statusLine.split(' ')[1], 10);
+                    const statusMessage = statusLine.split(' ').slice(2).join(' ');
 
-                        // Send response head to client
-                        clientRes.writeHead(statusCode, statusMessage, headers);
-
-                        // Forward any remaining data as body
-                        const bodyStart = headerEnd + 4;
-                        if (bodyStart < responseBuffer.length) {
-                            clientRes.write(responseBuffer.subarray(bodyStart));
+                    // Parse headers — repeated names (e.g. multiple
+                    // Set-Cookie) become arrays so they survive forwarding.
+                    const headers = {};
+                    for (const line of headerSection.split('\r\n').slice(1)) {
+                        const sep = line.indexOf(':');
+                        if (sep === -1) continue;
+                        const key = line.substring(0, sep).trim();
+                        const val = line.substring(sep + 1).trim();
+                        if (headers[key] === undefined) {
+                            headers[key] = val;
+                        } else if (Array.isArray(headers[key])) {
+                            headers[key].push(val);
+                        } else {
+                            headers[key] = [headers[key], val];
                         }
                     }
+
+                    // Send response head to client
+                    clientRes.writeHead(statusCode, statusMessage, headers);
+
+                    // Forward body bytes that arrived with the headers, then
+                    // release the header buffer.
+                    const bodyStart = headerEnd + 4;
+                    if (bodyStart < responseBuffer.length) {
+                        clientRes.write(responseBuffer.subarray(bodyStart));
+                    }
+                    responseBuffer = null;
                 } else {
                     // Forward body chunks
                     clientRes.write(chunk);

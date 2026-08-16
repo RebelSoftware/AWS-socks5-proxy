@@ -297,12 +297,12 @@ show_status() {
 show_logs() {
     print_header "Proxy Logs"
     
-    echo -e "${BLUE}Local Proxy Logs (http-proxy):${NC}"
-    docker compose logs http-proxy
+    echo -e "${BLUE}Local Proxy Logs (http-proxy, last 200 lines):${NC}"
+    docker compose logs --tail 200 http-proxy
     
     echo ""
-    echo -e "${BLUE}Orchestrator Logs:${NC}"
-    docker compose logs proxy-orchestrator
+    echo -e "${BLUE}Orchestrator Logs (last 200 lines):${NC}"
+    docker compose logs --tail 200 proxy-orchestrator
     
     echo ""
     echo -e "${BLUE}Fargate Task Logs (last 50 lines):${NC}"

@@ -9,6 +9,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+# CloudFormation stack name — referenced by the config prompts (reaper
+# default lookup) and by the deploy step further down.
+STACK_NAME="proxy-fargate-proxy"
+
 print_header() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BLUE}$1${NC}"
@@ -51,6 +55,14 @@ if ! docker compose version &> /dev/null; then
     exit 1
 fi
 print_success "Docker Compose installed"
+
+# jq is used for parsing AWS CLI JSON output throughout this script.
+if ! command -v jq &> /dev/null; then
+    print_error "jq not installed (required for output parsing)"
+    echo "Install with: sudo apt-get install jq   (or your package manager)"
+    exit 1
+fi
+print_success "jq installed"
 
 # Verify AWS credentials
 print_header "Verifying AWS Credentials"
@@ -417,15 +429,50 @@ else
     print_success "Tasks will auto-stop after $TASK_IDLE_TIMEOUT_MINUTES minutes of inactivity."
 fi
 
+# Reaper (abandoned-task) configuration
+print_header "Reaper (Runaway Task) Configuration"
+
+# Default to 120 minutes; on re-runs, reuse the value already deployed
+# in the CloudFormation stack (best effort).
+CURRENT_REAPER="120"
+STACK_REAPER=$(aws cloudformation describe-stacks \
+    --stack-name $STACK_NAME \
+    --region "$REGION" \
+    --query 'Stacks[0].Parameters[?ParameterKey==`ReaperTimeoutMinutes`].ParameterValue | [0]' \
+    --output text 2>/dev/null || echo "")
+if [[ "$STACK_REAPER" =~ ^[0-9]+$ ]]; then
+    CURRENT_REAPER="$STACK_REAPER"
+fi
+
+echo ""
+print_info "Safety net: if this machine dies while a Fargate task is running,"
+print_info "an AWS-side reaper force-stops tasks older than N minutes so a"
+print_info "forgotten proxy can never run up a large bill. This is NOT the"
+print_info "activity idle timeout — that is handled locally by the orchestrator."
+echo ""
+read -p "Reaper timeout in minutes [${CURRENT_REAPER}]: " REAPER_TIMEOUT_MINUTES
+REAPER_TIMEOUT_MINUTES="${REAPER_TIMEOUT_MINUTES:-$CURRENT_REAPER}"
+
+# Validate input is a non-negative integer (0 disables the reaper)
+while ! [[ "$REAPER_TIMEOUT_MINUTES" =~ ^[0-9]+$ ]]; do
+    print_error "Please enter a valid non-negative integer (0 disables the reaper)."
+    read -p "Reaper timeout in minutes [${CURRENT_REAPER}]: " REAPER_TIMEOUT_MINUTES
+    REAPER_TIMEOUT_MINUTES="${REAPER_TIMEOUT_MINUTES:-$CURRENT_REAPER}"
+done
+
+if [ "$REAPER_TIMEOUT_MINUTES" -eq 0 ]; then
+    print_info "Reaper disabled — abandoned tasks will NOT be force-stopped."
+else
+    print_success "Reaper will force-stop any task older than $REAPER_TIMEOUT_MINUTES minutes."
+fi
+
 # Deploy CloudFormation stack (create or update)
 print_header "Deploying AWS Infrastructure"
 
-STACK_NAME="proxy-fargate-proxy"
-
-# Build parameter list
+# Build parameter list — must match the Parameters block in
+# fargate-infrastructure.yaml.
 PARAMS="ParameterKey=EnvironmentName,ParameterValue=proxy"
-PARAMS="$PARAMS ParameterKey=TaskIdleTimeoutMinutes,ParameterValue=${TASK_IDLE_TIMEOUT_MINUTES}"
-PARAMS="$PARAMS ParameterKey=DualIPRetentionMinutes,ParameterValue=180"
+PARAMS="$PARAMS ParameterKey=ReaperTimeoutMinutes,ParameterValue=${REAPER_TIMEOUT_MINUTES}"
 
 if [ "$IP_ALLOWLIST_ENABLED" = "true" ]; then
     PARAMS="$PARAMS ParameterKey=IPAllowlistEnabled,ParameterValue=true"
@@ -491,52 +538,29 @@ else
     fi
 fi
 
-# Extract outputs
+# Extract outputs — one describe-stacks call, parsed locally with jq.
 print_header "Extracting Infrastructure Details"
 
-CLUSTER_NAME=$(aws cloudformation describe-stacks \
+STACK_JSON=$(aws cloudformation describe-stacks \
     --stack-name $STACK_NAME \
-    --region $REGION \
-    --query 'Stacks[0].Outputs[?OutputKey==`ClusterName`].OutputValue' \
-    --output text)
+    --region $REGION)
 
-TASK_DEF=$(aws cloudformation describe-stacks \
-    --stack-name $STACK_NAME \
-    --region $REGION \
-    --query 'Stacks[0].Outputs[?OutputKey==`TaskDefinition`].OutputValue' \
-    --output text)
-
-SUBNET_ID=$(aws cloudformation describe-stacks \
-    --stack-name $STACK_NAME \
-    --region $REGION \
-    --query 'Stacks[0].Outputs[?OutputKey==`SubnetId1`].OutputValue' \
-    --output text)
-
-SG_ID=$(aws cloudformation describe-stacks \
-    --stack-name $STACK_NAME \
-    --region $REGION \
-    --query 'Stacks[0].Outputs[?OutputKey==`SecurityGroupId`].OutputValue' \
-    --output text)
+CLUSTER_NAME=$(echo "$STACK_JSON" | jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="ClusterName") | .OutputValue')
+TASK_DEF=$(echo "$STACK_JSON" | jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="TaskDefinition") | .OutputValue')
+SUBNET_ID=$(echo "$STACK_JSON" | jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="SubnetId1") | .OutputValue')
+SG_ID=$(echo "$STACK_JSON" | jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="SecurityGroupId") | .OutputValue')
 
 echo "Cluster Name:      $CLUSTER_NAME"
 echo "Task Definition:   $TASK_DEF"
 echo "Subnet:            $SUBNET_ID"
 echo "Security Group:    $SG_ID"
 
-# Extract IP allowlist outputs (may not exist if condition is false)
-ALLOWLIST_ENABLED_OUTPUT=$(aws cloudformation describe-stacks \
-    --stack-name $STACK_NAME \
-    --region $REGION \
-    --query 'Stacks[0].Outputs[?OutputKey==`IPAllowlistEnabled`].OutputValue' \
-    --output text 2>/dev/null || echo "false")
+# IP allowlist outputs may be absent when the stack condition is false.
+ALLOWLIST_ENABLED_OUTPUT=$(echo "$STACK_JSON" | jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="IPAllowlistEnabled") | .OutputValue // "false"')
 
 if [ "$ALLOWLIST_ENABLED_OUTPUT" = "true" ]; then
     echo "IP Allowlist:      enabled"
-    ALLOWLISTED_IP=$(aws cloudformation describe-stacks \
-        --stack-name $STACK_NAME \
-        --region $REGION \
-        --query 'Stacks[0].Outputs[?OutputKey==`AllowlistedIP`].OutputValue' \
-        --output text 2>/dev/null || echo "")
+    ALLOWLISTED_IP=$(echo "$STACK_JSON" | jq -r '.Stacks[0].Outputs[] | select(.OutputKey=="AllowlistedIP") | .OutputValue // ""')
     [ -n "$ALLOWLISTED_IP" ] && echo "Allowlisted IP:    $ALLOWLISTED_IP"
 else
     echo "IP Allowlist:      disabled"
@@ -594,8 +618,6 @@ EXECUTION_ROLE_NAME=$(aws cloudformation describe-stack-resources \
     --region $REGION \
     --query 'StackResources[?ResourceType==`AWS::IAM::Role` && LogicalResourceId==`TaskExecutionRole`].PhysicalResourceId' \
     --output text )
-echo "first try"
-echo "Execution role name: $EXECUTION_ROLE_NAME" 
 
 TASK_ROLE_NAME=$(aws cloudformation describe-stack-resources \
     --stack-name $STACK_NAME \
@@ -603,22 +625,17 @@ TASK_ROLE_NAME=$(aws cloudformation describe-stack-resources \
     --query 'StackResources[?ResourceType==`AWS::IAM::Role` && LogicalResourceId==`TaskRole`].PhysicalResourceId' \
     --output text )
 
-echo "Task role name: $TASK_ROLE_NAME"
-
 # Second try: list IAM roles by stack naming pattern if describe-stack-resources didn't return them
 if [ -z "$EXECUTION_ROLE_NAME" ]; then
     EXECUTION_ROLE_NAME=$(aws iam list-roles \
         --query "Roles[?starts_with(RoleName, \`${STACK_NAME}-TaskExecutionRole\`)].RoleName" \
         --output text )
-    echo "second try"
-    echo "Execution role name: $EXECUTION_ROLE_NAME"
 fi
 
 if [ -z "$TASK_ROLE_NAME" ]; then
     TASK_ROLE_NAME=$(aws iam list-roles \
         --query "Roles[?starts_with(RoleName, \`${STACK_NAME}-TaskRole\`) && !starts_with(RoleName, \`${STACK_NAME}-TaskExecutionRole\`)].RoleName" \
         --output text )
-    echo "Task role name: $TASK_ROLE_NAME"
 fi
 
 if [ -z "$EXECUTION_ROLE_NAME" ] || [ -z "$TASK_ROLE_NAME" ]; then
@@ -730,6 +747,11 @@ TASK_SECURITY_GROUP=$SG_ID
 LOCAL_PROXY_PORT=8080
 SOCKS5_PORT=1080
 TASK_IDLE_TIMEOUT_MINUTES=$TASK_IDLE_TIMEOUT_MINUTES
+# URL the orchestrator polls to read activity from the http-proxy container.
+HTTP_PROXY_HEALTH_URL=http://http-proxy:8081/health
+
+# NOTE: the reaper (abandoned-task force stop) is configured as a
+# CloudFormation parameter (ReaperTimeoutMinutes) via setup.sh, not here.
 
 # Remote task auto-start: false (default) = ./proxy-manage.sh start runs the
 # local proxy WITHOUT auto-starting the remote Fargate task (cost savings).
@@ -792,6 +814,11 @@ echo -e "   ${BLUE}./proxy-manage.sh stop --remote${NC}   # Stop local proxy and
 echo ""
 echo "Estimated cost: ~\$1.20-2.40/month for typical usage"
 echo "Tasks auto-stop after ${TASK_IDLE_TIMEOUT_MINUTES:-60} minutes of inactivity"
+if [ "$REAPER_TIMEOUT_MINUTES" -gt 0 ]; then
+    echo "Reaper safety net: tasks older than $REAPER_TIMEOUT_MINUTES minutes are force-stopped"
+else
+    echo "Reaper disabled — abandoned tasks will keep running"
+fi
 echo ""
 echo "For more info, see README.md and DEPLOYMENT.md"
 echo ""

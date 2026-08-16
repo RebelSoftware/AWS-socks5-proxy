@@ -6,17 +6,16 @@ Manages the lifecycle of Fargate SOCKS5 tasks:
 - Monitors running tasks
 - Starts new tasks when needed
 - Detects IP changes
-- Notifies HTTP proxy of endpoint changes
+- Publishes endpoint status (polled by the HTTP proxy)
 - Provides management API
 """
 
 import os
 import sys
+import ipaddress
 import boto3
 import time
-import json
 import logging
-import socket
 import threading
 from datetime import datetime
 import requests
@@ -25,9 +24,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Log level comes from LOG_LEVEL (passed by docker-compose); default INFO.
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+
 # Configure comprehensive logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format='%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
@@ -48,6 +50,16 @@ LOCAL_PROXY_PORT = int(os.getenv('LOCAL_PROXY_PORT', '8080'))
 IP_ALLOWLIST_ENABLED = os.getenv('IP_ALLOWLIST_ENABLED', 'false').lower() == 'true'
 CLIENT_SECURITY_GROUP_ID = os.getenv('CLIENT_SECURITY_GROUP_ID')  # Security group ID to update with client IP
 DUAL_IP_RETENTION_MINUTES = int(os.getenv('DUAL_IP_RETENTION_MINUTES', '180'))
+
+# IP echo services used to detect this machine's public IP. Kept as a
+# fallback list because any single service can be down or rate-limited.
+# Shared by get_local_public_ip() and the /ip/diagnose endpoint.
+IP_ECHO_SERVICES = [
+    'https://checkip.amazonaws.com',
+    'https://api.ipify.org',
+    'https://ident.me',
+    'https://ifconfig.me',
+]
 
 # Idle timeout and wake configuration
 TASK_IDLE_TIMEOUT_MINUTES = int(os.getenv('TASK_IDLE_TIMEOUT_MINUTES', '60'))
@@ -101,9 +113,6 @@ class FargateProxyOrchestrator:
         
         self.task_ip = None
         self.task_arn = None
-        self.last_update_time = time.time()
-        self.connection_errors = 0
-        self.max_connection_errors = 5
         
         # Idle timeout and wake-up state
         self.idle_mode = False
@@ -147,9 +156,6 @@ class FargateProxyOrchestrator:
         
         except Exception as e:
             logger.error(f"Error listing/describing tasks: {e}", exc_info=True)
-            self.connection_errors += 1
-            if self.connection_errors > self.max_connection_errors:
-                logger.critical(f"Too many connection errors ({self.connection_errors}), restarting")
             return []
 
     def get_task_public_ip(self, task):
@@ -279,7 +285,6 @@ class FargateProxyOrchestrator:
             logger.info(f"Task started successfully: {self.task_arn} (status: {task_status})")
             logger.debug(f"Task definition: {response['tasks'][0].get('taskDefinitionArn', 'unknown')}")
             
-            self.connection_errors = 0  # Reset error counter on success
             return True
         
         except Exception as e:
@@ -362,15 +367,11 @@ class FargateProxyOrchestrator:
             return None
         
         try:
-            # Use multiple services for redundancy
-            ip_services = [
-                'https://checkip.amazonaws.com',
-                'https://api.ipify.org',
-                'https://ident.me'
-            ]
+            # Use multiple services for redundancy — any single echo
+            # service can be down or rate-limited (see IP_ECHO_SERVICES).
             last_error = None
             
-            for service in ip_services:
+            for service in IP_ECHO_SERVICES:
                 try:
                     logger.debug(f"Attempting IP detection from {service}...")
                     response = requests.get(service, timeout=10)
@@ -402,16 +403,14 @@ class FargateProxyOrchestrator:
             return None
     
     def _is_valid_ip(self, ip_str):
-        """Validate if string is a valid IPv4 address"""
+        """Return True if ip_str is a syntactically valid IPv4 address.
+
+        Security-group rules are built as '<ip>/32', so only IPv4 is
+        accepted (IPv6 addresses need a different CIDR form).
+        """
         try:
-            parts = ip_str.split('.')
-            if len(parts) != 4:
-                return False
-            for part in parts:
-                if not part.isdigit() or not (0 <= int(part) <= 255):
-                    return False
-            return True
-        except:
+            return ipaddress.ip_address(str(ip_str)).version == 4
+        except ValueError:
             return False
     
     def update_security_group_for_ip(self, client_ip):
@@ -559,7 +558,6 @@ class FargateProxyOrchestrator:
                 ip = self.get_task_public_ip(task)
                 if ip:
                     self.task_ip = ip
-                    self.connection_errors = 0
                     logger.info(f"Using running task with IP: {ip}")
                     return ip
                 else:
@@ -884,14 +882,9 @@ def ip_diagnose():
     
     try:
         results = {}
-        ip_services = [
-            'https://checkip.amazonaws.com',
-            'https://api.ipify.org',
-            'https://ident.me',
-            'https://ifconfig.me'
-        ]
-        
-        for service in ip_services:
+        # Reuse the same service list as get_local_public_ip() so the
+        # diagnostics reflect real detection behavior.
+        for service in IP_ECHO_SERVICES:
             try:
                 start = time.time()
                 response = requests.get(service, timeout=10)
@@ -921,16 +914,6 @@ def ip_diagnose():
         return {'status': 'error', 'message': str(e)}, 500
 
 
-def notify_http_proxy(ip, port):
-    """Notify HTTP proxy of SOCKS5 endpoint change"""
-    try:
-        logger.info(f"Notifying HTTP proxy of SOCKS5 endpoint: {ip}:{port}")
-        # This is handled internally by the http_proxy reading from orchestrator
-        logger.debug("HTTP proxy will detect IP change on next check")
-    except Exception as e:
-        logger.error(f"Error notifying HTTP proxy: {e}")
-
-
 def monitor_task():
     """Background thread that monitors task health, idle timeout, and IP changes"""
     logger.info("Starting task monitor thread...")
@@ -954,11 +937,11 @@ def monitor_task():
             # Ensure we have a running task (never auto-start when --no-remote)
             current_ip = orchestrator.ensure_task_running(auto_start=orchestrator.auto_start_remote)
             
-            # Check if task IP changed
+            # Check if task IP changed — the http-proxy polls /status and
+            # picks up the new endpoint on its own; no push needed.
             if current_ip and current_ip != previous_ip:
                 if previous_ip:
                     logger.warning(f"SOCKS5 endpoint IP changed: {previous_ip} -> {current_ip}")
-                    notify_http_proxy(current_ip, SOCKS5_PORT)
                 previous_ip = current_ip
             
             # Check idle timeout — shut down remote if proxy is idle

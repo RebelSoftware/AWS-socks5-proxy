@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Fargate SOCKS5 Proxy Infrastructure - Auto-shutdown at 60min idle'
+Description: 'Fargate SOCKS5 Proxy Infrastructure - orchestrator idle shutdown + abandoned-task reaper'
 
 Parameters:
   EnvironmentName:
@@ -7,10 +7,10 @@ Parameters:
     Default: proxy
     Description: Environment name for resource naming
   
-  TaskIdleTimeoutMinutes:
+  ReaperTimeoutMinutes:
     Type: Number
-    Default: 60
-    Description: Minutes of inactivity before auto-shutdown
+    Default: 120
+    Description: Max task age in minutes before the reaper force-stops it (abandoned-task cost guard; 0 disables)
   
   ClientPublicIP:
     Type: String
@@ -22,11 +22,6 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: Enable IP allowlist mode (security group restricted to ClientPublicIP)
-  
-  DualIPRetentionMinutes:
-    Type: Number
-    Default: 180
-    Description: Minutes to retain old IP in security group when IP changes (for connection continuity)
   
   ProxyUsername:
     Type: String
@@ -263,7 +258,8 @@ Resources:
           # Bind mount or volume for persistent config
           MountPoints: []
           
-          # Container will be stopped by orchestrator or auto-shutdown Lambda
+          # Lifecycle: idle-stopped by the local orchestrator; force-stopped by
+          # the reaper Lambda if this machine dies (see ReaperFunction below).
 
       Tags:
         - Key: Name
@@ -276,8 +272,18 @@ Resources:
       LogGroupName: !Sub '/ecs/${EnvironmentName}-go-socks5-proxy'
       RetentionInDays: 7
 
-  # Lambda for Auto-Shutdown
-  AutoShutdownRole:
+  # ────────────────────────────────────────────────────────────────
+  # Reaper: last-resort cost guard for abandoned Fargate tasks.
+  #
+  # The local orchestrator performs the real, activity-based idle
+  # shutdown. This Lambda exists only for the failure case where this
+  # machine dies while a task is running: no traffic can flow without
+  # the local proxy, so a task older than ReaperTimeoutMinutes is
+  # certainly abandoned and is stopped on task age alone.
+  # (The upstream socks5 image does not log per-connection activity,
+  # so CloudWatch log scanning is NOT a usable activity signal.)
+  # ────────────────────────────────────────────────────────────────
+  ReaperRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -299,121 +305,98 @@ Resources:
                   - ecs:DescribeTasks
                   - ecs:ListTasks
                   - ecs:StopTask
-                  - ecs:UpdateService
-                  - logs:FilterLogEvents
                 Resource: '*'
 
-  AutoShutdownFunction:
+  ReaperFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub '${EnvironmentName}-socks5-autoshutdown'
+      FunctionName: !Sub '${EnvironmentName}-socks5-reaper'
       Runtime: python3.11
       Handler: index.lambda_handler
-      Role: !GetAtt AutoShutdownRole.Arn
+      Role: !GetAtt ReaperRole.Arn
       Timeout: 60
       Environment:
         Variables:
           CLUSTER_NAME: !Ref ProxyCluster
-          TASK_IDLE_TIMEOUT_MINUTES: !Ref TaskIdleTimeoutMinutes
-          LOG_GROUP_NAME: !Ref TaskLogGroup
+          REAPER_TIMEOUT_MINUTES: !Ref ReaperTimeoutMinutes
       Code:
         ZipFile: |
-          import boto3
-          import json
-          import os
-          from datetime import datetime, timedelta
-          
-          ecs = boto3.client('ecs')
-          logs = boto3.client('logs')
-          
-          CLUSTER_NAME = os.environ['CLUSTER_NAME']
-          TASK_IDLE_TIMEOUT_MINUTES = int(os.environ['TASK_IDLE_TIMEOUT_MINUTES'])
-          LOG_GROUP = os.environ['LOG_GROUP_NAME']
-          
-          def lambda_handler(event, context):
-              try:
-                  # List running tasks
-                  response = ecs.list_tasks(
-                      cluster=CLUSTER_NAME,
-                      desiredStatus='RUNNING'
-                  )
-                  
-                  if not response['taskArns']:
-                      print("No running tasks")
-                      return {'statusCode': 200, 'body': 'No tasks running'}
-                  
-                  # Check each task for inactivity
-                  for task_arn in response['taskArns']:
-                      task_details = ecs.describe_tasks(
-                          cluster=CLUSTER_NAME,
-                          tasks=[task_arn]
-                      )
-                      
-                      if not task_details['tasks']:
-                          continue
-                      
-                      task = task_details['tasks'][0]
-                      task_id = task_arn.split('/')[-1]
-                      
-                      # Check CloudWatch Logs for recent activity
-                      # ECS Fargate stream format: {prefix}/{container_name}/{task_id}
-                      log_stream = f"ecs/socks5-proxy/{task_id}"
-                      
-                      try:
-                          log_response = logs.filter_log_events(
-                              logGroupName=LOG_GROUP,
-                              logStreamNamePrefix=log_stream,
-                              startTime=int((datetime.now() - timedelta(minutes=TASK_IDLE_TIMEOUT_MINUTES)).timestamp() * 1000)
-                          )
-                          
-                          if log_response.get('events'):
-                              print(f"Task {task_id}: activity detected")
-                              continue
-                      except logs.exceptions.ResourceNotFoundException:
-                          pass
-                      
-                      # No recent activity, check task metrics via describe
-                      # For simplicity, we'll check the task's createdAt time
-                      created_time = task['createdAt'].replace(tzinfo=None)
-                      task_age = (datetime.utcnow() - created_time).total_seconds() / 60
-                      
-                      if task_age > TASK_IDLE_TIMEOUT_MINUTES:
-                          print(f"Stopping inactive task {task_id} (age: {task_age} minutes)")
-                          ecs.stop_task(
-                              cluster=CLUSTER_NAME,
-                              task=task_arn,
-                              reason='Auto-shutdown due to inactivity'
-                          )
-                          
-                          return {
-                              'statusCode': 200,
-                              'body': f'Stopped task {task_id} due to inactivity'
-                          }
-                  
-                  return {'statusCode': 200, 'body': 'All tasks active'}
-                  
-              except Exception as e:
-                  print(f"Error: {str(e)}")
-                  return {'statusCode': 500, 'body': f'Error: {str(e)}'}
+          """Reaper: stop Fargate tasks that have outlived their welcome.
 
-  # EventBridge Rule to trigger auto-shutdown Lambda every 15 minutes
-  AutoShutdownSchedule:
+          This is a COST GUARD, not the activity-based idle shutdown —
+          the local orchestrator does that. It exists for the failure
+          case where the local machine dies while a task keeps running.
+          All traffic flows through the local proxy, so a task older
+          than REAPER_TIMEOUT_MINUTES is certainly abandoned and safe
+          to stop on task age alone.
+          """
+          import boto3
+          import os
+          from datetime import datetime, timezone
+
+          ecs = boto3.client('ecs')
+
+          CLUSTER_NAME = os.environ['CLUSTER_NAME']
+          REAPER_TIMEOUT_MINUTES = int(os.environ['REAPER_TIMEOUT_MINUTES'])
+
+          def lambda_handler(event, context):
+              # 0 (or negative) disables the reaper — set via setup.sh.
+              if REAPER_TIMEOUT_MINUTES <= 0:
+                  print('Reaper disabled (REAPER_TIMEOUT_MINUTES <= 0)')
+                  return {'statusCode': 200, 'body': 'Reaper disabled'}
+
+              running = ecs.list_tasks(cluster=CLUSTER_NAME, desiredStatus='RUNNING')
+              task_arns = running.get('taskArns', [])
+              if not task_arns:
+                  return {'statusCode': 200, 'body': 'No running tasks'}
+
+              # One batched describe instead of one call per task.
+              tasks = ecs.describe_tasks(
+                  cluster=CLUSTER_NAME,
+                  tasks=task_arns
+              ).get('tasks', [])
+
+              now = datetime.now(timezone.utc)
+              stopped = []
+
+              for task in tasks:
+                  created = task.get('createdAt')
+                  if created is None:
+                      continue
+                  age_minutes = (now - created).total_seconds() / 60
+
+                  if age_minutes > REAPER_TIMEOUT_MINUTES:
+                      ecs.stop_task(
+                          cluster=CLUSTER_NAME,
+                          task=task['taskArn'],
+                          reason=f'Reaper: abandoned task (older than {REAPER_TIMEOUT_MINUTES} minutes)'
+                      )
+                      stopped.append(task['taskArn'])
+                      print(f"Stopped abandoned task {task['taskArn'].split('/')[-1]} "
+                            f"(age: {age_minutes:.0f} minutes)")
+
+              body = (f'Stopped {len(stopped)} abandoned task(s)'
+                      if stopped else 'No abandoned tasks')
+              return {'statusCode': 200, 'body': body}
+
+  # EventBridge Rule to run the reaper every 15 minutes
+  ReaperSchedule:
     Type: AWS::Events::Rule
     Properties:
-      Description: Trigger auto-shutdown check every 15 minutes
+      Description: Trigger the abandoned-task reaper check every 15 minutes
       ScheduleExpression: rate(15 minutes)
       State: ENABLED
       Targets:
-        - Arn: !GetAtt AutoShutdownFunction.Arn
-          Id: AutoShutdownTarget
+        - Arn: !GetAtt ReaperFunction.Arn
+          Id: ReaperTarget
 
-  AutoShutdownLambdaPermission:
+  ReaperLambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref AutoShutdownFunction
+      FunctionName: !Ref ReaperFunction
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt AutoShutdownSchedule.Arn
+      SourceArn: !GetAtt ReaperSchedule.Arn
 
 Outputs:
   ClusterName:
@@ -464,12 +447,6 @@ Outputs:
     Value: !Ref PublicSubnet2
     Export:
       Name: !Sub '${EnvironmentName}-subnet-2'
-
-  SecurityGroupId:
-    Description: Security Group ID
-    Value: !Ref ProxySecurityGroup
-    Export:
-      Name: !Sub '${EnvironmentName}-sg-id'
 
   LogGroupName:
     Description: CloudWatch Log Group
